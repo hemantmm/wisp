@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: wisp
+    runtime: java
+    plan: free
+    buildCommand: mvn -DskipTests package
+    startCommand: java -jar target/tcpchat-1.0.0.jar
