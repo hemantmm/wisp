@@ -13,6 +13,9 @@ import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -118,15 +121,17 @@ public final class ChatClient implements WebSocket.Listener {
                 }
                 case "users" -> printUsers(data.get("users"));
                 case "system" -> System.out.println("* " + data.get("text"));
-                case "chat" -> System.out.println("[" + data.get("from") + "] " + data.get("text"));
+                case "chat" -> System.out.println(
+                        "[" + data.get("from") + "] " + data.get("text") + formatTime(data.get("time")));
                 case "pm" -> {
                     String from = String.valueOf(data.get("from"));
                     String to = String.valueOf(data.get("to"));
                     String text = String.valueOf(data.get("text"));
+                    String when = formatTime(data.get("time"));
                     if (from.equals(me)) {
-                        System.out.println("[PM to " + to + "] " + text);
+                        System.out.println("[PM to " + to + "] " + text + when);
                     } else {
-                        System.out.println("[PM from " + from + "] " + text);
+                        System.out.println("[PM from " + from + "] " + text + when);
                     }
                 }
                 case "error" -> {
@@ -140,6 +145,20 @@ public final class ChatClient implements WebSocket.Listener {
             }
         } catch (Exception e) {
             System.out.println(raw);
+        }
+    }
+
+    private static String formatTime(Object iso) {
+        if (iso == null) {
+            return "";
+        }
+        try {
+            String clock = DateTimeFormatter.ofPattern("h:mm a")
+                    .withZone(ZoneId.systemDefault())
+                    .format(Instant.parse(String.valueOf(iso)));
+            return "  (" + clock + ")";
+        } catch (Exception e) {
+            return "";
         }
     }
 

@@ -6,6 +6,7 @@ import io.javalin.Javalin;
 import io.javalin.http.staticfiles.Location;
 import io.javalin.websocket.WsContext;
 
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -112,6 +113,7 @@ public final class WebChatServer {
         payload.put("type", "chat");
         payload.put("from", from);
         payload.put("text", message);
+        payload.put("time", Instant.now().toString());
         registry.broadcast(payload);
     }
 
@@ -132,6 +134,7 @@ public final class WebChatServer {
         payload.put("from", from);
         payload.put("to", target);
         payload.put("text", message);
+        payload.put("time", Instant.now().toString());
 
         if (!registry.sendTo(target, payload)) {
             send(ctx, error("User not found: " + target));

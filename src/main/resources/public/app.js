@@ -83,10 +83,10 @@ function handle(data) {
       addSystem(data.text);
       break;
     case "chat":
-      addChat(data.from, data.text, false);
+      addChat(data.from, data.text, false, undefined, data.time);
       break;
     case "pm":
-      addChat(data.from, data.text, true, data.to);
+      addChat(data.from, data.text, true, data.to, data.time);
       break;
     default:
       break;
@@ -150,7 +150,15 @@ function addSystem(text) {
   item.scrollIntoView({ block: "end" });
 }
 
-function addChat(from, text, isPm, to) {
+function formatTime(iso) {
+  const date = iso ? new Date(iso) : new Date();
+  if (Number.isNaN(date.getTime())) {
+    return new Date().toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  }
+  return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function addChat(from, text, isPm, to, isoTime) {
   const item = document.createElement("li");
   item.className = from === me ? "mine" : "theirs";
   if (isPm) item.classList.add("pm");
@@ -163,7 +171,11 @@ function addChat(from, text, isPm, to) {
     : from;
   const body = document.createElement("span");
   body.textContent = text;
-  item.append(meta, body);
+  const time = document.createElement("time");
+  time.className = "time";
+  time.dateTime = isoTime || new Date().toISOString();
+  time.textContent = formatTime(isoTime);
+  item.append(meta, body, time);
   messages.append(item);
   item.scrollIntoView({ block: "end" });
 }

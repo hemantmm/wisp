@@ -305,6 +305,15 @@ main {
   margin-bottom: 0.18rem;
 }
 
+#messages .time {
+  display: block;
+  margin-top: 0.35rem;
+  font-size: 0.68rem;
+  color: var(--muted);
+}
+
+#messages .mine .time { text-align: right; }
+
 #messages .mine {
   background: var(--mine);
   margin-left: auto;
