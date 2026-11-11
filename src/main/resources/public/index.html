@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Wisp — live chat</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="join-screen" class="screen join-screen">
+    <div class="join-card">
+      <div class="mark" aria-hidden="true">w</div>
+      <p class="eyebrow">Shared room</p>
+      <h1>Wisp</h1>
+      <p class="lede">Chat in the browser or from the CLI. Open a second window to talk both ways.</p>
+      <form id="join-form">
+        <label for="username">Username</label>
+        <input id="username" name="username" maxlength="20" autocomplete="nickname" placeholder="letters, digits, _" required>
+        <p id="join-error" class="error" hidden></p>
+        <button type="submit">Join the room</button>
+      </form>
+    </div>
+  </div>
+
+  <div id="chat-screen" class="screen chat-screen" hidden>
+    <div id="scrim" class="scrim" hidden></div>
+    <aside id="sidebar">
+      <header class="brand">
+        <div>
+          <strong>Wisp</strong>
+          <span id="me"></span>
+        </div>
+        <button type="button" id="sidebar-close" class="icon-btn" aria-label="Close people list">✕</button>
+      </header>
+      <p class="aside-label">People</p>
+      <ul id="user-list"></ul>
+    </aside>
+    <main>
+      <header class="room-header">
+        <button type="button" id="people-toggle" class="icon-btn" aria-label="Open people list">☰</button>
+        <div class="room-copy">
+          <h2 id="room-title">Everyone</h2>
+          <p id="room-hint">Messages go to the whole room.</p>
+        </div>
+        <button type="button" id="online-pill" class="pill" aria-label="Open people list">
+          <span class="dot"></span>
+          <span id="online-count">0</span>
+        </button>
+      </header>
+      <ol id="messages"></ol>
+      <form id="composer">
+        <input id="text" autocomplete="off" enterkeyhint="send" placeholder="Message everyone">
+        <button type="submit">Send</button>
+      </form>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
