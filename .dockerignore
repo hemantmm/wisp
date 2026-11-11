@@ -1,0 +1,12 @@
+# flyctl launch added from .github/modernize/java-upgrade/.gitignore
+
+.github/modernize/java-upgrade/**/**/*
+
+# flyctl launch added from .gitignore
+**/target
+**/.idea
+**/*.iml
+**/.classpath
+**/.project
+**/.settings
+fly.toml
