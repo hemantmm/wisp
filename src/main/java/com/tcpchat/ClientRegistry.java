@@ -13,6 +13,10 @@ final class ClientRegistry {
         return clients.putIfAbsent(username, connection) == null;
     }
 
+    void replace(String username, ChatConnection connection) {
+        clients.put(username, connection);
+    }
+
     boolean unregister(String username, ChatConnection connection) {
         return clients.remove(username, connection);
     }

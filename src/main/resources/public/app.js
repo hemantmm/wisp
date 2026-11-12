@@ -15,35 +15,85 @@ const sidebarClose = document.getElementById("sidebar-close");
 const scrim = document.getElementById("scrim");
 const onlineCount = document.getElementById("online-count");
 const onlinePill = document.getElementById("online-pill");
+const leaveButton = document.getElementById("leave");
+const nameFields = document.getElementById("name-fields");
+const resumeCopy = document.getElementById("resume-copy");
+const resumeName = document.getElementById("resume-name");
+const joinSubmit = document.getElementById("join-submit");
+
+const HEARTBEAT_MS = 2000;
+const NAME_KEY = "wisp.username";
 
 let socket;
 let me = "";
 let whisperTo = null;
 let pendingUsername = "";
 let onlineUsers = [];
+let stayInRoom = false;
+let joined = false;
+let heartbeatTimer;
+let reconnectTimer;
+let reconnectAttempt = 0;
+let lastSystem = "";
 
 function wsUrl() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${location.host}/ws`;
 }
 
+function startHeartbeat() {
+  stopHeartbeat();
+  heartbeatTimer = setInterval(() => {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      send({ type: "ping" });
+    }
+  }, HEARTBEAT_MS);
+}
+
+function stopHeartbeat() {
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = undefined;
+}
+
 function connect() {
+  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
   socket = new WebSocket(wsUrl());
   socket.addEventListener("open", () => {
-    if (pendingUsername) {
-      send({ type: "join", username: pendingUsername });
+    reconnectAttempt = 0;
+    startHeartbeat();
+    const name = lockedName() || me || pendingUsername;
+    if (name) {
+      send({ type: "join", username: name, reclaim: Boolean(lockedName()) });
     }
   });
   socket.addEventListener("message", (event) => {
     handle(JSON.parse(event.data));
   });
   socket.addEventListener("close", () => {
-    addSystem("Disconnected from server.");
+    stopHeartbeat();
+    if (stayInRoom) {
+      scheduleReconnect();
+    }
   });
 }
 
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  reconnectAttempt += 1;
+  const delay = Math.min(400 * reconnectAttempt, 4000);
+  addSystem("Connection lost. Reconnecting…");
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, delay);
+}
+
 function send(payload) {
-  socket.send(JSON.stringify(payload));
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify(payload));
+  }
 }
 
 function showJoinError(text) {
@@ -63,17 +113,38 @@ function closePeople() {
 
 function handle(data) {
   switch (data.type) {
+    case "pong":
+      break;
     case "error":
-      if (!me) showJoinError(data.text);
-      else addSystem(data.text);
+      if (!joined) {
+        stayInRoom = false;
+        showJoinScreen();
+        showJoinError(data.text);
+      } else {
+        addSystem(data.text);
+      }
       break;
     case "welcome":
+      joined = true;
       me = data.username;
+      stayInRoom = true;
+      pendingUsername = data.username;
+      localStorage.setItem(NAME_KEY, me);
       joinScreen.hidden = true;
       chatScreen.hidden = false;
       meLabel.textContent = me;
       renderUsers(data.users || []);
-      addSystem(`Welcome, ${me}.`);
+      messages.replaceChildren();
+      if (!data.reconnected) {
+        addSystem(`Welcome, ${me}.`);
+      }
+      for (const item of data.history || []) {
+        if (item.type === "pm") {
+          addChat(item.from, item.text, true, item.to, item.time);
+        } else {
+          addChat(item.from, item.text, false, undefined, item.time);
+        }
+      }
       textInput.focus();
       break;
     case "users":
@@ -143,6 +214,8 @@ function setTarget(name) {
 }
 
 function addSystem(text) {
+  if (text === lastSystem) return;
+  lastSystem = text;
   const item = document.createElement("li");
   item.className = "system";
   item.textContent = text;
@@ -159,6 +232,7 @@ function formatTime(iso) {
 }
 
 function addChat(from, text, isPm, to, isoTime) {
+  lastSystem = "";
   const item = document.createElement("li");
   item.className = from === me ? "mine" : "theirs";
   if (isPm) item.classList.add("pm");
@@ -180,6 +254,45 @@ function addChat(from, text, isPm, to, isoTime) {
   item.scrollIntoView({ block: "end" });
 }
 
+function lockedName() {
+  return localStorage.getItem(NAME_KEY) || "";
+}
+
+function showJoinScreen() {
+  const name = lockedName();
+  joinError.hidden = true;
+  joinScreen.hidden = false;
+  chatScreen.hidden = true;
+  if (name) {
+    usernameInput.removeAttribute("required");
+    nameFields.hidden = true;
+    resumeCopy.hidden = false;
+    resumeName.textContent = name;
+    joinSubmit.textContent = "Continue as " + name;
+  } else {
+    usernameInput.required = true;
+    nameFields.hidden = false;
+    resumeCopy.hidden = true;
+    joinSubmit.textContent = "Join the room";
+  }
+}
+
+function exitRoom() {
+  joined = false;
+  stayInRoom = false;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  stopHeartbeat();
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    send({ type: "leave" });
+    socket.close();
+  }
+  whisperTo = null;
+  messages.replaceChildren();
+  closePeople();
+  showJoinScreen();
+}
+
 peopleToggle.addEventListener("click", openPeople);
 onlinePill.addEventListener("click", openPeople);
 sidebarClose.addEventListener("click", closePeople);
@@ -187,12 +300,21 @@ scrim.addEventListener("click", closePeople);
 
 joinForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  pendingUsername = usernameInput.value.trim();
+  const saved = lockedName();
+  pendingUsername = saved || usernameInput.value.trim();
+  if (!pendingUsername) {
+    showJoinError("Choose a username for this device.");
+    return;
+  }
+  if (saved && pendingUsername !== saved) {
+    pendingUsername = saved;
+  }
+  me = pendingUsername;
   joinError.hidden = true;
   if (!socket || socket.readyState === WebSocket.CLOSED) {
     connect();
   } else if (socket.readyState === WebSocket.OPEN) {
-    send({ type: "join", username: pendingUsername });
+    send({ type: "join", username: pendingUsername, reclaim: Boolean(saved) });
   }
 });
 
@@ -204,5 +326,33 @@ composer.addEventListener("submit", (event) => {
   else send({ type: "chat", text });
   textInput.value = "";
 });
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && stayInRoom) {
+    if (!socket || socket.readyState === WebSocket.CLOSED) {
+      connect();
+    }
+  }
+});
+
+leaveButton.addEventListener("click", exitRoom);
+
+window.addEventListener("storage", (event) => {
+  if (event.key !== NAME_KEY || !event.newValue) {
+    return;
+  }
+  me = event.newValue;
+  pendingUsername = event.newValue;
+});
+
+const savedName = lockedName();
+if (savedName) {
+  me = savedName;
+  pendingUsername = savedName;
+  stayInRoom = true;
+  meLabel.textContent = savedName;
+  joinScreen.hidden = true;
+  chatScreen.hidden = false;
+}
 
 connect();

@@ -10,6 +10,9 @@ import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
 public final class WebChatServer {
@@ -18,8 +21,14 @@ public final class WebChatServer {
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
 
     private final ClientRegistry registry = new ClientRegistry();
+    private final RoomHistory history = new RoomHistory();
     private final ObjectMapper mapper = new ObjectMapper();
     private final ConcurrentHashMap<WsContext, Session> sessions = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService departures = Executors.newSingleThreadScheduledExecutor(task -> {
+        Thread thread = new Thread(task, "departures");
+        thread.setDaemon(true);
+        return thread;
+    });
 
     public static void main(String[] args) {
         int port = DEFAULT_PORT;
@@ -39,7 +48,7 @@ public final class WebChatServer {
         });
 
         app.ws("/ws", ws -> {
-            ws.onConnect(ctx -> ctx.enableAutomaticPings());
+            ws.onConnect(ctx -> ctx.enableAutomaticPings(8, java.util.concurrent.TimeUnit.SECONDS));
             ws.onMessage(ctx -> handleMessage(ctx, ctx.message()));
             ws.onClose(ctx -> leave(ctx));
             ws.onError(ctx -> leave(ctx));
@@ -62,9 +71,15 @@ public final class WebChatServer {
         Session session = sessions.get(ctx);
         String username = session == null ? null : session.username;
 
+        if ("ping".equals(type)) {
+            send(ctx, Map.of("type", "pong"));
+            return;
+        }
+
         if (username == null) {
             if ("join".equals(type)) {
-                join(ctx, stringify(incoming.get("username")));
+                boolean reclaim = Boolean.TRUE.equals(incoming.get("reclaim"));
+                join(ctx, stringify(incoming.get("username")), reclaim);
             } else {
                 send(ctx, error("Join with a username first."));
             }
@@ -75,11 +90,12 @@ public final class WebChatServer {
             case "chat" -> broadcastChat(username, stringify(incoming.get("text")));
             case "pm" -> sendPrivate(ctx, username, stringify(incoming.get("to")), stringify(incoming.get("text")));
             case "users" -> send(ctx, registry.usersPayload());
+            case "leave" -> departNow(ctx);
             default -> send(ctx, error("Unknown message type."));
         }
     }
 
-    private void join(WsContext ctx, String name) {
+    private void join(WsContext ctx, String name, boolean reclaim) {
         String username = name == null ? "" : name.trim();
         if (!USERNAME_PATTERN.matcher(username).matches()) {
             send(ctx, error("Use 1–20 letters, digits, or underscores."));
@@ -87,9 +103,16 @@ public final class WebChatServer {
         }
 
         ChatConnection connection = payload -> send(ctx, payload);
+        boolean reconnect = false;
         if (!registry.register(username, connection)) {
-            send(ctx, error("That username is already taken."));
-            return;
+            if (!reclaim) {
+                send(ctx, error("That username is already taken."));
+                return;
+            }
+            registry.replace(username, connection);
+            reconnect = true;
+            sessions.entrySet().removeIf(entry ->
+                    username.equals(entry.getValue().username()) && entry.getKey() != ctx);
         }
 
         sessions.put(ctx, new Session(username, connection));
@@ -98,9 +121,13 @@ public final class WebChatServer {
         welcome.put("type", "welcome");
         welcome.put("username", username);
         welcome.put("users", registry.usernames());
+        welcome.put("reconnected", reconnect);
+        welcome.put("history", history.forUser(username));
         send(ctx, welcome);
 
-        registry.broadcast(system(username + " joined"));
+        if (!reconnect) {
+            registry.broadcast(system(username + " joined"));
+        }
         registry.broadcast(registry.usersPayload());
     }
 
@@ -114,6 +141,7 @@ public final class WebChatServer {
         payload.put("from", from);
         payload.put("text", message);
         payload.put("time", Instant.now().toString());
+        history.add(payload);
         registry.broadcast(payload);
     }
 
@@ -140,6 +168,7 @@ public final class WebChatServer {
             send(ctx, error("User not found: " + target));
             return;
         }
+        history.add(payload);
         send(ctx, payload);
     }
 
@@ -148,6 +177,17 @@ public final class WebChatServer {
         if (session == null) {
             return;
         }
+        departures.schedule(() -> departIfStill(session), 8, TimeUnit.SECONDS);
+    }
+
+    private void departNow(WsContext ctx) {
+        Session session = sessions.remove(ctx);
+        if (session != null) {
+            departIfStill(session);
+        }
+    }
+
+    private void departIfStill(Session session) {
         if (registry.unregister(session.username, session.connection)) {
             registry.broadcast(system(session.username + " left"));
             registry.broadcast(registry.usersPayload());

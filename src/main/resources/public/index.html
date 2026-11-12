@@ -13,11 +13,14 @@
       <p class="eyebrow">Shared room</p>
       <h1>Wisp</h1>
       <p class="lede">Chat in the browser or from the CLI. Open a second window to talk both ways.</p>
+      <p id="resume-copy" class="lede" hidden>This device is signed in as <strong id="resume-name"></strong>. You'll keep that name, like WhatsApp.</p>
       <form id="join-form">
-        <label for="username">Username</label>
-        <input id="username" name="username" maxlength="20" autocomplete="nickname" placeholder="letters, digits, _" required>
+        <div id="name-fields">
+          <label for="username">Username</label>
+          <input id="username" name="username" maxlength="20" autocomplete="nickname" placeholder="letters, digits, _">
+        </div>
         <p id="join-error" class="error" hidden></p>
-        <button type="submit">Join the room</button>
+        <button type="submit" id="join-submit">Join the room</button>
       </form>
     </div>
   </div>
@@ -42,6 +45,7 @@
           <h2 id="room-title">Everyone</h2>
           <p id="room-hint">Messages go to the whole room.</p>
         </div>
+        <button type="button" id="leave" class="pill leave">Leave</button>
         <button type="button" id="online-pill" class="pill" aria-label="Open people list">
           <span class="dot"></span>
           <span id="online-count">0</span>
