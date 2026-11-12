@@ -21,7 +21,7 @@ primary_region = 'iad'
   processes = ['app']
 
   [http_service.http_options]
-    idle_timeout = 3600
+    idle_timeout = 900
 
 [[vm]]
   size = 'shared-cpu-1x'
