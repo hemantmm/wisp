@@ -22,6 +22,7 @@ public final class WebChatServer {
     private final RoomHistory history = new RoomHistory();
     private final ObjectMapper mapper = new ObjectMapper();
     private final ConcurrentHashMap<WsContext, Session> sessions = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<WsContext, Object> writeLocks = new ConcurrentHashMap<>();
     private final ScheduledExecutorService departures = Executors.newSingleThreadScheduledExecutor(task -> {
         Thread thread = new Thread(task, "departures");
         thread.setDaemon(true);
@@ -46,7 +47,10 @@ public final class WebChatServer {
         });
 
         app.ws("/ws", ws -> {
-            ws.onConnect(ctx -> ctx.enableAutomaticPings(8, java.util.concurrent.TimeUnit.SECONDS));
+            ws.onConnect(ctx -> {
+                writeLocks.putIfAbsent(ctx, new Object());
+                ctx.enableAutomaticPings(8, java.util.concurrent.TimeUnit.SECONDS);
+            });
             ws.onMessage(ctx -> handleMessage(ctx, ctx.message()));
             ws.onClose(ctx -> leave(ctx));
             ws.onError(ctx -> leave(ctx));
@@ -178,14 +182,15 @@ public final class WebChatServer {
 
     private void leave(WsContext ctx) {
         Session session = sessions.remove(ctx);
-        if (session == null) {
-            return;
+        if (session != null) {
+            departures.schedule(() -> departIfStill(session), 8, TimeUnit.SECONDS);
         }
-        departures.schedule(() -> departIfStill(session), 8, TimeUnit.SECONDS);
+        writeLocks.remove(ctx);
     }
 
     private void departNow(WsContext ctx) {
         Session session = sessions.remove(ctx);
+        writeLocks.remove(ctx);
         if (session != null) {
             departIfStill(session);
         }
@@ -201,12 +206,21 @@ public final class WebChatServer {
     private record Session(String username, ChatConnection connection) {}
 
     private void send(WsContext ctx, Map<String, Object> payload) {
+        String json;
         try {
-            if (ctx.session.isOpen()) {
-                ctx.send(mapper.writeValueAsString(payload));
+            json = mapper.writeValueAsString(payload);
+        } catch (Exception e) {
+            return;
+        }
+        Object lock = writeLocks.computeIfAbsent(ctx, ignored -> new Object());
+        synchronized (lock) {
+            try {
+                if (ctx.session.isOpen()) {
+                    ctx.send(json);
+                }
+            } catch (Exception ignored) {
+                // client already gone
             }
-        } catch (Exception ignored) {
-            // client already gone
         }
     }
 
