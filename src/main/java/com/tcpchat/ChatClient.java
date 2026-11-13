@@ -9,6 +9,8 @@ import java.io.FileOutputStream;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.net.URI;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.nio.charset.StandardCharsets;
@@ -19,6 +21,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.CountDownLatch;
 
@@ -184,7 +187,11 @@ public final class ChatClient implements WebSocket.Listener {
                     System.out.println("Enter username:");
                     continue;
                 }
-                send(Map.of("type", "join", "username", username));
+                Map<String, Object> join = new LinkedHashMap<>();
+                join.put("type", "join");
+                join.put("username", username);
+                join.put("token", deviceToken());
+                send(join);
                 continue;
             }
             if (line.isEmpty()) {
@@ -229,5 +236,22 @@ public final class ChatClient implements WebSocket.Listener {
 
     private void send(Map<String, Object> payload) throws Exception {
         webSocket.sendText(mapper.writeValueAsString(payload), true);
+    }
+
+    private static String deviceToken() {
+        try {
+            Path path = Path.of(System.getProperty("user.home"), ".wisp-device-token");
+            if (Files.isRegularFile(path)) {
+                String stored = Files.readString(path, StandardCharsets.UTF_8).trim();
+                if (Username.isValidToken(stored)) {
+                    return stored;
+                }
+            }
+            String token = UUID.randomUUID().toString();
+            Files.writeString(path, token, StandardCharsets.UTF_8);
+            return token;
+        } catch (Exception e) {
+            return UUID.randomUUID().toString();
+        }
     }
 }

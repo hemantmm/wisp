@@ -23,6 +23,7 @@ const joinSubmit = document.getElementById("join-submit");
 
 const HEARTBEAT_MS = 2000;
 const NAME_KEY = "wisp.username";
+const TOKEN_KEY = "wisp.token";
 const USERNAME_PATTERN = /^[A-Za-z0-9_]{1,20}$/;
 
 let socket;
@@ -66,7 +67,7 @@ function connect() {
     startHeartbeat();
     const name = lockedName() || me || pendingUsername;
     if (name) {
-      send({ type: "join", username: name, reclaim: Boolean(lockedName()) });
+      send({ type: "join", username: name, token: deviceToken() });
     }
   });
   socket.addEventListener("message", (event) => {
@@ -197,10 +198,10 @@ function renderUsers(users) {
 
   for (const name of safeUsers) {
     const classes = [];
-    if (name === me) classes.push("you");
-    if (whisperTo === name) classes.push("active");
-    const item = addPerson(name, initial(name), name === me ? `${name} (you)` : name, classes.join(" "));
-    if (name !== me) {
+    if (sameName(name, me)) classes.push("you");
+    if (sameName(whisperTo, name)) classes.push("active");
+    const item = addPerson(name, initial(name), sameName(name, me) ? `${name} (you)` : name, classes.join(" "));
+    if (!sameName(name, me)) {
       item.addEventListener("click", () => setTarget(name));
     }
   }
@@ -219,7 +220,7 @@ function setTarget(name) {
   }
   for (const item of userList.children) {
     const target = item.dataset.target || "";
-    item.classList.toggle("active", name ? target === name : target === "");
+    item.classList.toggle("active", name ? sameName(target, name) : target === "");
   }
   closePeople();
   textInput.focus();
@@ -246,12 +247,12 @@ function formatTime(iso) {
 function addChat(from, text, isPm, to, isoTime) {
   lastSystem = "";
   const item = document.createElement("li");
-  item.className = from === me ? "mine" : "theirs";
+  item.className = sameName(from, me) ? "mine" : "theirs";
   if (isPm) item.classList.add("pm");
   const meta = document.createElement("span");
   meta.className = "meta";
   meta.textContent = isPm
-    ? from === me
+    ? sameName(from, me)
       ? `whisper to ${to}`
       : `whisper from ${from}`
     : from;
@@ -268,6 +269,19 @@ function addChat(from, text, isPm, to, isoTime) {
 
 function lockedName() {
   return localStorage.getItem(NAME_KEY) || "";
+}
+
+function sameName(left, right) {
+  return String(left || "").toLowerCase() === String(right || "").toLowerCase();
+}
+
+function deviceToken() {
+  let token = localStorage.getItem(TOKEN_KEY);
+  if (!token) {
+    token = crypto.randomUUID();
+    localStorage.setItem(TOKEN_KEY, token);
+  }
+  return token;
 }
 
 function showJoinScreen() {
@@ -326,7 +340,7 @@ joinForm.addEventListener("submit", (event) => {
   if (!socket || socket.readyState === WebSocket.CLOSED) {
     connect();
   } else if (socket.readyState === WebSocket.OPEN) {
-    send({ type: "join", username: pendingUsername, reclaim: Boolean(saved) });
+    send({ type: "join", username: pendingUsername, token: deviceToken() });
   }
 });
 

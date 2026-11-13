@@ -22,7 +22,8 @@ final class RoomHistory {
         List<Map<String, Object>> visible = new ArrayList<>();
         for (Map<String, Object> message : messages) {
             if ("pm".equals(message.get("type"))) {
-                if (username.equals(message.get("from")) || username.equals(message.get("to"))) {
+                if (Username.same(username, stringify(message.get("from")))
+                        || Username.same(username, stringify(message.get("to")))) {
                     visible.add(message);
                 }
             } else {
@@ -30,5 +31,9 @@ final class RoomHistory {
             }
         }
         return visible;
+    }
+
+    private static String stringify(Object value) {
+        return value == null ? "" : String.valueOf(value);
     }
 }

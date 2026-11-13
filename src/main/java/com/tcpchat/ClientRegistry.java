@@ -7,43 +7,88 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 final class ClientRegistry {
-    private final ConcurrentHashMap<String, ChatConnection> clients = new ConcurrentHashMap<>();
+    enum Claim {
+        NEW,
+        RECLAIM,
+        TAKEN,
+        INVALID
+    }
 
-    boolean register(String username, ChatConnection connection) {
+    private static final class Identity {
+        private final String token;
+        private final String displayName;
+        private volatile ChatConnection connection;
+
+        private Identity(String token, String displayName, ChatConnection connection) {
+            this.token = token;
+            this.displayName = displayName;
+            this.connection = connection;
+        }
+    }
+
+    private final ConcurrentHashMap<String, Identity> identities = new ConcurrentHashMap<>();
+
+    Claim claim(String username, String token, ChatConnection connection) {
+        if (!Username.isValid(username) || !Username.isValidToken(token)) {
+            return Claim.INVALID;
+        }
+        String key = Username.key(username);
+        Identity created = new Identity(token, username, connection);
+        Identity existing = identities.putIfAbsent(key, created);
+        if (existing == null) {
+            return Claim.NEW;
+        }
+        if (!existing.token.equals(token)) {
+            return Claim.TAKEN;
+        }
+        existing.connection = connection;
+        return Claim.RECLAIM;
+    }
+
+    String displayName(String username) {
         if (!Username.isValid(username)) {
+            return username;
+        }
+        Identity identity = identities.get(Username.key(username));
+        return identity == null ? username : identity.displayName;
+    }
+
+    boolean disconnect(String username, ChatConnection connection) {
+        Identity identity = identities.get(Username.key(username));
+        if (identity == null || identity.connection != connection) {
             return false;
         }
-        return clients.putIfAbsent(username, connection) == null;
-    }
-
-    void replace(String username, ChatConnection connection) {
-        if (!Username.isValid(username)) {
-            return;
-        }
-        clients.put(username, connection);
-    }
-
-    boolean unregister(String username, ChatConnection connection) {
-        return clients.remove(username, connection);
+        identity.connection = null;
+        return true;
     }
 
     void broadcast(Map<String, Object> payload) {
-        for (ChatConnection connection : clients.values()) {
-            connection.send(payload);
+        for (Identity identity : identities.values()) {
+            ChatConnection connection = identity.connection;
+            if (connection != null) {
+                connection.send(payload);
+            }
         }
     }
 
     boolean sendTo(String username, Map<String, Object> payload) {
-        ChatConnection connection = clients.get(username);
-        if (connection == null) {
+        if (!Username.isValid(username)) {
             return false;
         }
-        connection.send(payload);
+        Identity identity = identities.get(Username.key(username));
+        if (identity == null || identity.connection == null) {
+            return false;
+        }
+        identity.connection.send(payload);
         return true;
     }
 
     List<String> usernames() {
-        return clients.keySet().stream().filter(Username::isValid).sorted().toList();
+        return identities.values().stream()
+                .filter(identity -> identity.connection != null)
+                .map(identity -> identity.displayName)
+                .sorted(String.CASE_INSENSITIVE_ORDER)
+                .toList();
     }
 
     Map<String, Object> usersPayload() {

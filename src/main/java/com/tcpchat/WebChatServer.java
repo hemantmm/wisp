@@ -76,8 +76,7 @@ public final class WebChatServer {
 
         if (username == null) {
             if ("join".equals(type)) {
-                boolean reclaim = Boolean.TRUE.equals(incoming.get("reclaim"));
-                join(ctx, stringify(incoming.get("username")), reclaim);
+                join(ctx, stringify(incoming.get("username")), stringify(incoming.get("token")));
             } else {
                 send(ctx, error("Join with a username first."));
             }
@@ -93,38 +92,44 @@ public final class WebChatServer {
         }
     }
 
-    private void join(WsContext ctx, String name, boolean reclaim) {
+    private void join(WsContext ctx, String name, String token) {
         String username = name == null ? "" : name.trim();
         if (!Username.isValid(username)) {
             send(ctx, error("Use 1–20 letters, digits, or underscores."));
             return;
         }
-
-        ChatConnection connection = payload -> send(ctx, payload);
-        boolean reconnect = false;
-        if (!registry.register(username, connection)) {
-            if (!reclaim) {
-                send(ctx, error("That username is already taken."));
-                return;
-            }
-            registry.replace(username, connection);
-            reconnect = true;
-            sessions.entrySet().removeIf(entry ->
-                    username.equals(entry.getValue().username()) && entry.getKey() != ctx);
+        if (!Username.isValidToken(token)) {
+            send(ctx, error("Missing device token."));
+            return;
         }
 
-        sessions.put(ctx, new Session(username, connection));
+        ChatConnection connection = payload -> send(ctx, payload);
+        ClientRegistry.Claim claim = registry.claim(username, token, connection);
+        if (claim == ClientRegistry.Claim.INVALID) {
+            send(ctx, error("Use 1–20 letters, digits, or underscores."));
+            return;
+        }
+        if (claim == ClientRegistry.Claim.TAKEN) {
+            send(ctx, error("That username belongs to another device."));
+            return;
+        }
+
+        boolean reconnect = claim == ClientRegistry.Claim.RECLAIM;
+        String displayName = registry.displayName(username);
+        sessions.entrySet().removeIf(entry ->
+                Username.same(entry.getValue().username(), displayName) && entry.getKey() != ctx);
+        sessions.put(ctx, new Session(displayName, connection));
 
         Map<String, Object> welcome = new LinkedHashMap<>();
         welcome.put("type", "welcome");
-        welcome.put("username", username);
+        welcome.put("username", displayName);
         welcome.put("users", registry.usernames());
         welcome.put("reconnected", reconnect);
-        welcome.put("history", history.forUser(username));
+        welcome.put("history", history.forUser(displayName));
         send(ctx, welcome);
 
         if (!reconnect) {
-            registry.broadcast(system(username + " joined"));
+            registry.broadcast(system(displayName + " joined"));
         }
         registry.broadcast(registry.usersPayload());
     }
@@ -150,15 +155,16 @@ public final class WebChatServer {
             send(ctx, error("Private messages need a user and some text."));
             return;
         }
-        if (target.equals(from)) {
+        if (Username.same(target, from)) {
             send(ctx, error("You cannot message yourself."));
             return;
         }
 
+        String canonicalTo = registry.displayName(target);
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("type", "pm");
         payload.put("from", from);
-        payload.put("to", target);
+        payload.put("to", canonicalTo);
         payload.put("text", message);
         payload.put("time", Instant.now().toString());
 
@@ -186,7 +192,7 @@ public final class WebChatServer {
     }
 
     private void departIfStill(Session session) {
-        if (registry.unregister(session.username, session.connection)) {
+        if (registry.disconnect(session.username, session.connection)) {
             registry.broadcast(system(session.username + " left"));
             registry.broadcast(registry.usersPayload());
         }
