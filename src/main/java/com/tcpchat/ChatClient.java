@@ -208,6 +208,10 @@ public final class ChatClient implements WebSocket.Listener {
     /** @return true if the client should disconnect */
     private boolean handleCommand(String line) throws Exception {
         if (!line.startsWith("/")) {
+            if (line.length() > MessageGuard.MAX_TEXT) {
+                System.out.println("Messages can be at most " + MessageGuard.MAX_TEXT + " characters.");
+                return false;
+            }
             send(Map.of("type", "chat", "text", line));
             return false;
         }
@@ -221,6 +225,8 @@ public final class ChatClient implements WebSocket.Listener {
             case "/msg" -> {
                 if (parts.length < 3 || parts[2].isBlank()) {
                     System.out.println("Usage: /msg <user> <text>");
+                } else if (parts[2].length() > MessageGuard.MAX_TEXT) {
+                    System.out.println("Messages can be at most " + MessageGuard.MAX_TEXT + " characters.");
                 } else {
                     Map<String, Object> payload = new LinkedHashMap<>();
                     payload.put("type", "pm");

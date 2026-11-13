@@ -8,12 +8,15 @@ import java.util.List;
 import java.util.Map;
 
 final class RoomHistory {
-    private static final int LIMIT = 200;
     private final Deque<Map<String, Object>> messages = new ArrayDeque<>();
 
     synchronized void add(Map<String, Object> message) {
+        Object text = message.get("text");
+        if (text instanceof String value && value.length() > MessageGuard.MAX_TEXT) {
+            return;
+        }
         messages.addLast(new LinkedHashMap<>(message));
-        while (messages.size() > LIMIT) {
+        while (messages.size() > MessageGuard.HISTORY_LIMIT) {
             messages.removeFirst();
         }
     }

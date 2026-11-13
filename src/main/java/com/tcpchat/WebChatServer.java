@@ -20,6 +20,7 @@ public final class WebChatServer {
 
     private final ClientRegistry registry = new ClientRegistry();
     private final RoomHistory history = new RoomHistory();
+    private final MessageGuard guard = new MessageGuard();
     private final ObjectMapper mapper = new ObjectMapper();
     private final ConcurrentHashMap<WsContext, Session> sessions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<WsContext, Object> writeLocks = new ConcurrentHashMap<>();
@@ -61,6 +62,10 @@ public final class WebChatServer {
     }
 
     private void handleMessage(WsContext ctx, String raw) {
+        if (guard.tooLargeFrame(raw)) {
+            send(ctx, error("Message is too large."));
+            return;
+        }
         Map<String, Object> incoming;
         try {
             incoming = mapper.readValue(raw, MAP_TYPE);
@@ -88,7 +93,7 @@ public final class WebChatServer {
         }
 
         switch (type) {
-            case "chat" -> broadcastChat(username, stringify(incoming.get("text")));
+            case "chat" -> broadcastChat(ctx, username, stringify(incoming.get("text")));
             case "pm" -> sendPrivate(ctx, username, stringify(incoming.get("to")), stringify(incoming.get("text")));
             case "users" -> send(ctx, registry.usersPayload());
             case "leave" -> departNow(ctx);
@@ -138,9 +143,17 @@ public final class WebChatServer {
         registry.broadcast(registry.usersPayload());
     }
 
-    private void broadcastChat(String from, String text) {
+    private void broadcastChat(WsContext ctx, String from, String text) {
         String message = text == null ? "" : text.trim();
         if (message.isEmpty()) {
+            return;
+        }
+        if (guard.tooLong(message)) {
+            send(ctx, error("Messages can be at most " + MessageGuard.MAX_TEXT + " characters."));
+            return;
+        }
+        if (guard.tooFast(from)) {
+            send(ctx, error("You're sending too fast. Wait a moment."));
             return;
         }
         Map<String, Object> payload = new LinkedHashMap<>();
@@ -157,6 +170,14 @@ public final class WebChatServer {
         String message = text == null ? "" : text.trim();
         if (!Username.isValid(target) || message.isEmpty()) {
             send(ctx, error("Private messages need a user and some text."));
+            return;
+        }
+        if (guard.tooLong(message)) {
+            send(ctx, error("Messages can be at most " + MessageGuard.MAX_TEXT + " characters."));
+            return;
+        }
+        if (guard.tooFast(from)) {
+            send(ctx, error("You're sending too fast. Wait a moment."));
             return;
         }
         if (Username.same(target, from)) {

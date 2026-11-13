@@ -25,6 +25,7 @@ const HEARTBEAT_MS = 2000;
 const NAME_KEY = "wisp.username";
 const TOKEN_KEY = "wisp.token";
 const USERNAME_PATTERN = /^[A-Za-z0-9_]{1,20}$/;
+const MAX_TEXT = 2000;
 
 let socket;
 let me = "";
@@ -348,6 +349,10 @@ composer.addEventListener("submit", (event) => {
   event.preventDefault();
   const text = textInput.value.trim();
   if (!text || !socket || socket.readyState !== WebSocket.OPEN) return;
+  if (text.length > MAX_TEXT) {
+    addSystem("Messages can be at most " + MAX_TEXT + " characters.");
+    return;
+  }
   if (whisperTo) send({ type: "pm", to: whisperTo, text });
   else send({ type: "chat", text });
   textInput.value = "";
