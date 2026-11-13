@@ -10,10 +10,16 @@ final class ClientRegistry {
     private final ConcurrentHashMap<String, ChatConnection> clients = new ConcurrentHashMap<>();
 
     boolean register(String username, ChatConnection connection) {
+        if (!Username.isValid(username)) {
+            return false;
+        }
         return clients.putIfAbsent(username, connection) == null;
     }
 
     void replace(String username, ChatConnection connection) {
+        if (!Username.isValid(username)) {
+            return;
+        }
         clients.put(username, connection);
     }
 
@@ -37,7 +43,7 @@ final class ClientRegistry {
     }
 
     List<String> usernames() {
-        return clients.keySet().stream().sorted().toList();
+        return clients.keySet().stream().filter(Username::isValid).sorted().toList();
     }
 
     Map<String, Object> usersPayload() {

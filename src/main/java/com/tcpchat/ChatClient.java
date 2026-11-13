@@ -178,7 +178,13 @@ public final class ChatClient implements WebSocket.Listener {
                 break;
             }
             if (!joined) {
-                send(Map.of("type", "join", "username", line.trim()));
+                String username = line.trim();
+                if (!Username.isValid(username)) {
+                    System.out.println("Use 1–20 letters, digits, or underscores.");
+                    System.out.println("Enter username:");
+                    continue;
+                }
+                send(Map.of("type", "join", "username", username));
                 continue;
             }
             if (line.isEmpty()) {

@@ -23,6 +23,7 @@ const joinSubmit = document.getElementById("join-submit");
 
 const HEARTBEAT_MS = 2000;
 const NAME_KEY = "wisp.username";
+const USERNAME_PATTERN = /^[A-Za-z0-9_]{1,20}$/;
 
 let socket;
 let me = "";
@@ -165,32 +166,43 @@ function handle(data) {
 }
 
 function initial(name) {
-  return (name || "?").slice(0, 1).toUpperCase();
+  const letter = [...String(name || "?")][0] || "?";
+  return letter.toUpperCase();
+}
+
+function addPerson(target, avatarText, label, className) {
+  const item = document.createElement("li");
+  item.dataset.target = target;
+  if (className) {
+    item.className = className;
+  }
+  const avatar = document.createElement("span");
+  avatar.className = target === "" ? "avatar room" : "avatar";
+  avatar.textContent = avatarText;
+  const caption = document.createElement("span");
+  caption.textContent = label;
+  item.append(avatar, caption);
+  userList.append(item);
+  return item;
 }
 
 function renderUsers(users) {
-  onlineUsers = users;
-  onlineCount.textContent = String(users.length);
-  userList.innerHTML = "";
+  const safeUsers = (users || []).filter((name) => USERNAME_PATTERN.test(name));
+  onlineUsers = safeUsers;
+  onlineCount.textContent = String(safeUsers.length);
+  userList.replaceChildren();
 
-  const everyone = document.createElement("li");
-  everyone.dataset.target = "";
-  everyone.className = whisperTo ? "" : "active";
-  everyone.innerHTML = `<span class="avatar room">All</span><span>Everyone</span>`;
+  const everyone = addPerson("", "All", "Everyone", whisperTo ? "" : "active");
   everyone.addEventListener("click", () => setTarget(null));
-  userList.append(everyone);
 
-  for (const name of users) {
-    const item = document.createElement("li");
-    item.dataset.target = name;
-    if (name === me) item.classList.add("you");
-    if (whisperTo === name) item.classList.add("active");
-    const label = name === me ? `${name} (you)` : name;
-    item.innerHTML = `<span class="avatar">${initial(name)}</span><span>${label}</span>`;
+  for (const name of safeUsers) {
+    const classes = [];
+    if (name === me) classes.push("you");
+    if (whisperTo === name) classes.push("active");
+    const item = addPerson(name, initial(name), name === me ? `${name} (you)` : name, classes.join(" "));
     if (name !== me) {
       item.addEventListener("click", () => setTarget(name));
     }
-    userList.append(item);
   }
 }
 
@@ -302,8 +314,8 @@ joinForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const saved = lockedName();
   pendingUsername = saved || usernameInput.value.trim();
-  if (!pendingUsername) {
-    showJoinError("Choose a username for this device.");
+  if (!USERNAME_PATTERN.test(pendingUsername)) {
+    showJoinError("Use 1–20 letters, digits, or underscores.");
     return;
   }
   if (saved && pendingUsername !== saved) {

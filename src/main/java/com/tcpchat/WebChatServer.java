@@ -13,11 +13,9 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.regex.Pattern;
 
 public final class WebChatServer {
     public static final int DEFAULT_PORT = 8080;
-    private static final Pattern USERNAME_PATTERN = Pattern.compile("^[A-Za-z0-9_]{1,20}$");
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
 
     private final ClientRegistry registry = new ClientRegistry();
@@ -97,7 +95,7 @@ public final class WebChatServer {
 
     private void join(WsContext ctx, String name, boolean reclaim) {
         String username = name == null ? "" : name.trim();
-        if (!USERNAME_PATTERN.matcher(username).matches()) {
+        if (!Username.isValid(username)) {
             send(ctx, error("Use 1–20 letters, digits, or underscores."));
             return;
         }
@@ -148,7 +146,7 @@ public final class WebChatServer {
     private void sendPrivate(WsContext ctx, String from, String to, String text) {
         String target = to == null ? "" : to.trim();
         String message = text == null ? "" : text.trim();
-        if (target.isEmpty() || message.isEmpty()) {
+        if (!Username.isValid(target) || message.isEmpty()) {
             send(ctx, error("Private messages need a user and some text."));
             return;
         }
