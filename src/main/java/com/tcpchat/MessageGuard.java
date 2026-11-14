@@ -11,7 +11,7 @@ final class MessageGuard {
     private static final int RATE_COUNT = 8;
     private static final long RATE_WINDOW_MS = 5_000;
 
-    private final ConcurrentHashMap<String, Deque<Long>> sends = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Object, Deque<Long>> hits = new ConcurrentHashMap<>();
 
     boolean tooLargeFrame(String raw) {
         return raw != null && raw.length() > MAX_FRAME;
@@ -21,10 +21,12 @@ final class MessageGuard {
         return text.length() > MAX_TEXT;
     }
 
-    boolean tooFast(String username) {
+    boolean tooFast(Object key) {
+        if (key == null) {
+            return true;
+        }
         long now = System.currentTimeMillis();
-        String key = Username.key(username);
-        Deque<Long> times = sends.computeIfAbsent(key, ignored -> new ArrayDeque<>());
+        Deque<Long> times = hits.computeIfAbsent(key, ignored -> new ArrayDeque<>());
         synchronized (times) {
             while (!times.isEmpty() && now - times.peekFirst() > RATE_WINDOW_MS) {
                 times.removeFirst();
@@ -34,6 +36,12 @@ final class MessageGuard {
             }
             times.addLast(now);
             return false;
+        }
+    }
+
+    void forget(Object key) {
+        if (key != null) {
+            hits.remove(key);
         }
     }
 }

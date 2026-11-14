@@ -85,6 +85,10 @@ public final class WebChatServer {
 
         if (username == null) {
             if ("join".equals(type)) {
+                if (guard.tooFast(ctx)) {
+                    send(ctx, error("You're sending too fast. Wait a moment."));
+                    return;
+                }
                 join(ctx, stringify(incoming.get("username")), stringify(incoming.get("token")));
             } else {
                 send(ctx, error("Join with a username first."));
@@ -152,7 +156,7 @@ public final class WebChatServer {
             send(ctx, error("Messages can be at most " + MessageGuard.MAX_TEXT + " characters."));
             return;
         }
-        if (guard.tooFast(from)) {
+        if (guard.tooFast(Username.key(from))) {
             send(ctx, error("You're sending too fast. Wait a moment."));
             return;
         }
@@ -176,7 +180,7 @@ public final class WebChatServer {
             send(ctx, error("Messages can be at most " + MessageGuard.MAX_TEXT + " characters."));
             return;
         }
-        if (guard.tooFast(from)) {
+        if (guard.tooFast(Username.key(from))) {
             send(ctx, error("You're sending too fast. Wait a moment."));
             return;
         }
@@ -207,11 +211,13 @@ public final class WebChatServer {
             departures.schedule(() -> departIfStill(session), 8, TimeUnit.SECONDS);
         }
         writeLocks.remove(ctx);
+        guard.forget(ctx);
     }
 
     private void departNow(WsContext ctx) {
         Session session = sessions.remove(ctx);
         writeLocks.remove(ctx);
+        guard.forget(ctx);
         if (session != null) {
             departIfStill(session);
         }
