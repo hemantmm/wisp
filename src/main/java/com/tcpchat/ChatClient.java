@@ -137,6 +137,15 @@ public final class ChatClient implements WebSocket.Listener {
                         System.out.println("[PM from " + from + "] " + text + when);
                     }
                 }
+                case "update" -> {
+                    if (Boolean.TRUE.equals(data.get("deleted"))) {
+                        System.out.println("* " + data.get("from") + " deleted a message");
+                    } else if (Boolean.TRUE.equals(data.get("edited"))) {
+                        System.out.println("* " + data.get("from") + " edited: " + data.get("text"));
+                    }
+                }
+                case "typing", "pong" -> {
+                }
                 case "error" -> {
                     System.out.println(data.get("text"));
                     if (!joined) {

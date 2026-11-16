@@ -52,9 +52,16 @@
         </button>
       </header>
       <ol id="messages"></ol>
+      <p id="typing" class="typing" hidden></p>
       <form id="composer">
-        <input id="text" autocomplete="off" enterkeyhint="send" maxlength="2000" placeholder="Message everyone">
-        <button type="submit">Send</button>
+        <div id="compose-context" hidden>
+          <p id="compose-label"></p>
+          <button type="button" id="compose-cancel">Cancel</button>
+        </div>
+        <div class="compose-row">
+          <input id="text" autocomplete="off" enterkeyhint="send" maxlength="2000" placeholder="Message everyone">
+          <button type="submit">Send</button>
+        </div>
       </form>
     </main>
   </div>

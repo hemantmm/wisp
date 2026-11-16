@@ -20,12 +20,19 @@ const nameFields = document.getElementById("name-fields");
 const resumeCopy = document.getElementById("resume-copy");
 const resumeName = document.getElementById("resume-name");
 const joinSubmit = document.getElementById("join-submit");
+const typingLine = document.getElementById("typing");
+const composeContext = document.getElementById("compose-context");
+const composeLabel = document.getElementById("compose-label");
+const composeCancel = document.getElementById("compose-cancel");
+const sendButton = document.querySelector("#composer button[type=submit]");
 
 const HEARTBEAT_MS = 2000;
 const NAME_KEY = "wisp.username";
 const TOKEN_KEY = "wisp.token";
 const USERNAME_PATTERN = /^[A-Za-z0-9_]{1,20}$/;
 const MAX_TEXT = 2000;
+const REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🎉"];
+const URL_PATTERN = /https?:\/\/[^\s<]+/gi;
 
 let socket;
 let me = "";
@@ -38,6 +45,12 @@ let heartbeatTimer;
 let reconnectTimer;
 let reconnectAttempt = 0;
 let lastSystem = "";
+let replyTo = null;
+let editingId = null;
+let lastTypingSent = 0;
+const typingUntil = new Map();
+let seenTimer;
+const pendingSeen = new Set();
 
 function wsUrl() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -142,11 +155,8 @@ function handle(data) {
         addSystem(`Welcome, ${me}.`);
       }
       for (const item of data.history || []) {
-        if (item.type === "pm") {
-          addChat(item.from, item.text, true, item.to, item.time);
-        } else {
-          addChat(item.from, item.text, false, undefined, item.time);
-        }
+        renderMessage(item);
+        noteSeen(item);
       }
       textInput.focus();
       break;
@@ -157,10 +167,13 @@ function handle(data) {
       addSystem(data.text);
       break;
     case "chat":
-      addChat(data.from, data.text, false, undefined, data.time);
-      break;
     case "pm":
-      addChat(data.from, data.text, true, data.to, data.time);
+    case "update":
+      renderMessage(data);
+      noteSeen(data);
+      break;
+    case "typing":
+      showTyping(data.from, data.to);
       break;
     default:
       break;
@@ -245,27 +258,236 @@ function formatTime(iso) {
   return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
-function addChat(from, text, isPm, to, isoTime) {
+function messageKind(data) {
+  return data.messageType || data.type;
+}
+
+function renderMessage(data) {
   lastSystem = "";
-  const item = document.createElement("li");
-  item.className = sameName(from, me) ? "mine" : "theirs";
-  if (isPm) item.classList.add("pm");
+  const kind = messageKind(data);
+  let item = data.id ? messages.querySelector(`[data-id="${CSS.escape(data.id)}"]`) : null;
+  const created = !item;
+  if (!item) {
+    item = document.createElement("li");
+    if (data.id) item.dataset.id = data.id;
+  }
+  item.className = sameName(data.from, me) ? "mine" : "theirs";
+  if (kind === "pm") item.classList.add("pm");
+  item.replaceChildren();
+
   const meta = document.createElement("span");
   meta.className = "meta";
-  meta.textContent = isPm
-    ? sameName(from, me)
-      ? `whisper to ${to}`
-      : `whisper from ${from}`
-    : from;
+  meta.textContent = kind === "pm"
+    ? sameName(data.from, me)
+      ? `whisper to ${data.to}`
+      : `whisper from ${data.from}`
+    : data.from;
+  item.append(meta);
+
+  if (data.reply) {
+    const quote = document.createElement("span");
+    quote.className = "quote";
+    quote.textContent = `${data.reply.from}: ${data.reply.text}`;
+    item.append(quote);
+  }
+
   const body = document.createElement("span");
-  body.textContent = text;
+  body.className = data.deleted ? "body deleted" : "body";
+  if (data.deleted) {
+    body.textContent = "This message was deleted";
+  } else {
+    appendTextWithLinks(body, data.text || "");
+  }
+  item.append(body);
+
+  if (!data.deleted && data.preview && /^https?:\/\//.test(data.preview.url || "")) {
+    item.append(previewCard(data.preview));
+  }
+  if (!data.deleted) {
+    item.append(reactionRow(data));
+  }
+
   const time = document.createElement("time");
   time.className = "time";
-  time.dateTime = isoTime || new Date().toISOString();
-  time.textContent = formatTime(isoTime);
-  item.append(meta, body, time);
-  messages.append(item);
-  item.scrollIntoView({ block: "end" });
+  time.dateTime = data.time || new Date().toISOString();
+  time.textContent = formatTime(data.time) + (data.edited && !data.deleted ? " · edited" : "");
+  item.append(time);
+
+  const seen = (data.seen || []).filter((name) => !sameName(name, data.from));
+  if (seen.length) {
+    const receipt = document.createElement("span");
+    receipt.className = "seen";
+    receipt.textContent = `Seen by ${seen.join(", ")}`;
+    item.append(receipt);
+  }
+
+  if (!data.deleted) {
+    item.append(actionRow(data));
+  }
+  if (created) messages.append(item);
+  if (created) item.scrollIntoView({ block: "end" });
+}
+
+function appendTextWithLinks(parent, text) {
+  URL_PATTERN.lastIndex = 0;
+  let last = 0;
+  for (const match of text.matchAll(URL_PATTERN)) {
+    if (match.index > last) {
+      parent.append(document.createTextNode(text.slice(last, match.index)));
+    }
+    const url = match[0].replace(/[.,!?;:)]+$/, "");
+    if (/^https?:\/\//i.test(url)) {
+      const link = document.createElement("a");
+      link.href = url;
+      link.textContent = url;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      parent.append(link);
+    } else {
+      parent.append(document.createTextNode(match[0]));
+    }
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) parent.append(document.createTextNode(text.slice(last)));
+}
+
+function previewCard(preview) {
+  const card = document.createElement("a");
+  card.className = "preview";
+  card.href = preview.url;
+  card.target = "_blank";
+  card.rel = "noopener noreferrer";
+  if (typeof preview.image === "string" && preview.image.startsWith("https://")) {
+    const image = document.createElement("img");
+    image.alt = "";
+    image.referrerPolicy = "no-referrer";
+    image.src = preview.image;
+    card.append(image);
+  }
+  const title = document.createElement("strong");
+  title.textContent = preview.title || preview.site || preview.url;
+  card.append(title);
+  if (preview.description) {
+    const description = document.createElement("span");
+    description.textContent = preview.description;
+    card.append(description);
+  }
+  return card;
+}
+
+function reactionRow(data) {
+  const row = document.createElement("div");
+  row.className = "reactions";
+  const reactions = data.reactions || {};
+  for (const emoji of REACTIONS) {
+    const people = reactions[emoji] || [];
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = people.length ? `${emoji} ${people.length}` : emoji;
+    if (people.some((name) => sameName(name, me))) button.classList.add("mine");
+    button.addEventListener("click", () => send({ type: "react", id: data.id, emoji }));
+    row.append(button);
+  }
+  return row;
+}
+
+function actionRow(data) {
+  const row = document.createElement("div");
+  row.className = "actions";
+  const reply = document.createElement("button");
+  reply.type = "button";
+  reply.textContent = "Reply";
+  reply.addEventListener("click", () => startReply(data));
+  row.append(reply);
+  if (sameName(data.from, me)) {
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.textContent = "Edit";
+    edit.addEventListener("click", () => startEdit(data));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "Delete";
+    remove.addEventListener("click", () => {
+      if (!data.id) {
+        addSystem("This message cannot be deleted.");
+        return;
+      }
+      send({ type: "delete", id: data.id });
+    });
+    row.append(edit, remove);
+  }
+  return row;
+}
+
+function startReply(data) {
+  editingId = null;
+  replyTo = { id: data.id, from: data.from, text: data.text || "" };
+  composeContext.hidden = false;
+  composeLabel.textContent = `Replying to ${data.from}`;
+  textInput.focus();
+}
+
+function startEdit(data) {
+  if (!data.id) {
+    addSystem("This message cannot be edited.");
+    return;
+  }
+  replyTo = null;
+  editingId = data.id;
+  textInput.value = data.text || "";
+  composeContext.hidden = false;
+  composeLabel.textContent = "Editing your message. Change it, then press Save.";
+  sendButton.textContent = "Save";
+  textInput.focus();
+  textInput.select();
+  document.getElementById("composer").scrollIntoView({ block: "end" });
+}
+
+function clearComposeContext() {
+  replyTo = null;
+  editingId = null;
+  composeContext.hidden = true;
+  composeLabel.textContent = "";
+  sendButton.textContent = "Send";
+}
+
+function noteSeen(data) {
+  if (!data.id || data.deleted || sameName(data.from, me)) return;
+  if ((data.seen || []).some((name) => sameName(name, me))) return;
+  pendingSeen.add(data.id);
+  clearTimeout(seenTimer);
+  seenTimer = setTimeout(() => {
+    const ids = [...pendingSeen].slice(0, 30);
+    pendingSeen.clear();
+    if (ids.length) send({ type: "seen", ids });
+  }, 400);
+}
+
+function showTyping(from, to) {
+  if (!from || sameName(from, me)) return;
+  if (whisperTo) {
+    if (!sameName(from, whisperTo)) return;
+  } else if (to) {
+    return;
+  }
+  typingUntil.set(from, Date.now() + 3000);
+  renderTyping();
+}
+
+function renderTyping() {
+  const now = Date.now();
+  const names = [...typingUntil.entries()].filter(([, until]) => until > now).map(([name]) => name);
+  for (const [name, until] of typingUntil) {
+    if (until <= now) typingUntil.delete(name);
+  }
+  if (!names.length) {
+    typingLine.hidden = true;
+    typingLine.textContent = "";
+    return;
+  }
+  typingLine.hidden = false;
+  typingLine.textContent = names.length === 1 ? `${names[0]} is typing…` : `${names.join(", ")} are typing…`;
+  setTimeout(renderTyping, 1000);
 }
 
 function lockedName() {
@@ -348,14 +570,44 @@ joinForm.addEventListener("submit", (event) => {
 composer.addEventListener("submit", (event) => {
   event.preventDefault();
   const text = textInput.value.trim();
-  if (!text || !socket || socket.readyState !== WebSocket.OPEN) return;
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  if (editingId && !text) {
+    composeLabel.textContent = "Type the new text, then press Save. Delete removes the message.";
+    return;
+  }
+  if (!text) return;
   if (text.length > MAX_TEXT) {
     addSystem("Messages can be at most " + MAX_TEXT + " characters.");
     return;
   }
-  if (whisperTo) send({ type: "pm", to: whisperTo, text });
-  else send({ type: "chat", text });
+  if (editingId) {
+    send({ type: "edit", id: editingId, text });
+  } else if (whisperTo) {
+    const payload = { type: "pm", to: whisperTo, text };
+    if (replyTo) payload.replyTo = replyTo.id;
+    send(payload);
+  } else {
+    const payload = { type: "chat", text };
+    if (replyTo) payload.replyTo = replyTo.id;
+    send(payload);
+  }
   textInput.value = "";
+  clearComposeContext();
+});
+
+textInput.addEventListener("input", () => {
+  if (editingId || !socket || socket.readyState !== WebSocket.OPEN) return;
+  const now = Date.now();
+  if (now - lastTypingSent < 1500) return;
+  lastTypingSent = now;
+  const payload = { type: "typing" };
+  if (whisperTo) payload.to = whisperTo;
+  send(payload);
+});
+
+composeCancel.addEventListener("click", () => {
+  textInput.value = "";
+  clearComposeContext();
 });
 
 document.addEventListener("visibilitychange", () => {

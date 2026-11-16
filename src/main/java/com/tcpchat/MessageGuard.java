@@ -12,6 +12,7 @@ final class MessageGuard {
     private static final long RATE_WINDOW_MS = 5_000;
 
     private final ConcurrentHashMap<Object, Deque<Long>> hits = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Object, Long> typing = new ConcurrentHashMap<>();
 
     boolean tooLargeFrame(String raw) {
         return raw != null && raw.length() > MAX_FRAME;
@@ -39,9 +40,23 @@ final class MessageGuard {
         }
     }
 
+    boolean typingTooSoon(Object key) {
+        if (key == null) {
+            return true;
+        }
+        long now = System.currentTimeMillis();
+        Long previous = typing.get(key);
+        if (previous != null && now - previous < 1_500) {
+            return true;
+        }
+        typing.put(key, now);
+        return false;
+    }
+
     void forget(Object key) {
         if (key != null) {
             hits.remove(key);
+            typing.remove(key);
         }
     }
 }

@@ -63,9 +63,13 @@ final class ClientRegistry {
     }
 
     void broadcast(Map<String, Object> payload) {
+        broadcastExcept(null, payload);
+    }
+
+    void broadcastExcept(String username, Map<String, Object> payload) {
         for (Identity identity : identities.values()) {
             ChatConnection connection = identity.connection;
-            if (connection != null) {
+            if (connection != null && (username == null || !Username.same(identity.displayName, username))) {
                 connection.send(payload);
             }
         }

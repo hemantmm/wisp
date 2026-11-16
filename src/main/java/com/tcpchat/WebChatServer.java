@@ -8,7 +8,9 @@ import io.javalin.websocket.WsContext;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -21,6 +23,7 @@ public final class WebChatServer {
     private final ClientRegistry registry = new ClientRegistry();
     private final RoomHistory history = new RoomHistory();
     private final MessageGuard guard = new MessageGuard();
+    private final LinkPreviews linkPreviews = new LinkPreviews();
     private final ObjectMapper mapper = new ObjectMapper();
     private final ConcurrentHashMap<WsContext, Session> sessions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<WsContext, Object> writeLocks = new ConcurrentHashMap<>();
@@ -97,8 +100,13 @@ public final class WebChatServer {
         }
 
         switch (type) {
-            case "chat" -> broadcastChat(ctx, username, stringify(incoming.get("text")));
-            case "pm" -> sendPrivate(ctx, username, stringify(incoming.get("to")), stringify(incoming.get("text")));
+            case "chat" -> broadcastChat(ctx, username, stringify(incoming.get("text")), stringify(incoming.get("replyTo")));
+            case "pm" -> sendPrivate(ctx, username, stringify(incoming.get("to")), stringify(incoming.get("text")), stringify(incoming.get("replyTo")));
+            case "typing" -> showTyping(username, stringify(incoming.get("to")));
+            case "seen" -> markSeen(username, incoming.get("ids"));
+            case "edit" -> editMessage(ctx, username, stringify(incoming.get("id")), stringify(incoming.get("text")));
+            case "delete" -> deleteMessage(ctx, username, stringify(incoming.get("id")));
+            case "react" -> react(ctx, username, stringify(incoming.get("id")), stringify(incoming.get("emoji")));
             case "users" -> send(ctx, registry.usersPayload());
             case "leave" -> departNow(ctx);
             default -> send(ctx, error("Unknown message type."));
@@ -147,62 +155,159 @@ public final class WebChatServer {
         registry.broadcast(registry.usersPayload());
     }
 
-    private void broadcastChat(WsContext ctx, String from, String text) {
-        String message = text == null ? "" : text.trim();
-        if (message.isEmpty()) {
+    private void broadcastChat(WsContext ctx, String from, String text, String replyTo) {
+        String message = checkedText(ctx, from, text);
+        if (message == null) {
             return;
         }
-        if (guard.tooLong(message)) {
-            send(ctx, error("Messages can be at most " + MessageGuard.MAX_TEXT + " characters."));
-            return;
-        }
-        if (guard.tooFast(Username.key(from))) {
-            send(ctx, error("You're sending too fast. Wait a moment."));
-            return;
-        }
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("type", "chat");
-        payload.put("from", from);
-        payload.put("text", message);
-        payload.put("time", Instant.now().toString());
+        Map<String, Object> payload = baseMessage("chat", from, message, replyTo);
         history.add(payload);
         registry.broadcast(payload);
     }
 
-    private void sendPrivate(WsContext ctx, String from, String to, String text) {
+    private void sendPrivate(WsContext ctx, String from, String to, String text, String replyTo) {
         String target = to == null ? "" : to.trim();
-        String message = text == null ? "" : text.trim();
-        if (!Username.isValid(target) || message.isEmpty()) {
+        if (!Username.isValid(target)) {
             send(ctx, error("Private messages need a user and some text."));
             return;
         }
-        if (guard.tooLong(message)) {
-            send(ctx, error("Messages can be at most " + MessageGuard.MAX_TEXT + " characters."));
-            return;
-        }
-        if (guard.tooFast(Username.key(from))) {
-            send(ctx, error("You're sending too fast. Wait a moment."));
+        String message = checkedText(ctx, from, text);
+        if (message == null) {
             return;
         }
         if (Username.same(target, from)) {
             send(ctx, error("You cannot message yourself."));
             return;
         }
-
         String canonicalTo = registry.displayName(target);
-        Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("type", "pm");
-        payload.put("from", from);
-        payload.put("to", canonicalTo);
-        payload.put("text", message);
-        payload.put("time", Instant.now().toString());
-
-        if (!registry.sendTo(target, payload)) {
+        boolean online = registry.usernames().stream().anyMatch(name -> Username.same(name, target));
+        if (!online) {
             send(ctx, error("User not found: " + target));
             return;
         }
+        Map<String, Object> payload = baseMessage("pm", from, message, replyTo);
+        payload.put("to", canonicalTo);
         history.add(payload);
-        send(ctx, payload);
+        deliver(payload, false);
+    }
+
+    private String checkedText(WsContext ctx, String from, String text) {
+        String message = text == null ? "" : text.trim();
+        if (message.isEmpty()) {
+            return null;
+        }
+        if (guard.tooLong(message)) {
+            send(ctx, error("Messages can be at most " + MessageGuard.MAX_TEXT + " characters."));
+            return null;
+        }
+        if (guard.tooFast(Username.key(from))) {
+            send(ctx, error("You're sending too fast. Wait a moment."));
+            return null;
+        }
+        return message;
+    }
+
+    private Map<String, Object> baseMessage(String type, String from, String text, String replyTo) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", type);
+        payload.put("id", UUID.randomUUID().toString());
+        payload.put("from", from);
+        payload.put("text", text);
+        payload.put("time", Instant.now().toString());
+        Map<String, Object> reply = history.replySnapshot(replyTo, from);
+        if (reply != null) {
+            payload.put("reply", reply);
+        }
+        Map<String, Object> preview = linkPreviews.forText(text);
+        if (preview != null) {
+            payload.put("preview", preview);
+        }
+        return payload;
+    }
+
+    private void showTyping(String username, String to) {
+        if (guard.typingTooSoon(Username.key(username) + ":typing")) {
+            return;
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", "typing");
+        payload.put("from", username);
+        if (Username.isValid(to)) {
+            payload.put("to", registry.displayName(to));
+            registry.sendTo(to, payload);
+            return;
+        }
+        registry.broadcastExcept(username, payload);
+    }
+
+    private void markSeen(String username, Object rawIds) {
+        if (!(rawIds instanceof List<?> ids)) {
+            return;
+        }
+        int counted = 0;
+        for (Object rawId : ids) {
+            if (counted >= 30) {
+                break;
+            }
+            counted++;
+            Map<String, Object> updated = history.seen(stringify(rawId), username);
+            if (updated != null) {
+                deliver(updated, true);
+            }
+        }
+    }
+
+    private void editMessage(WsContext ctx, String username, String id, String text) {
+        String message = checkedText(ctx, username, text);
+        if (message == null) {
+            return;
+        }
+        Map<String, Object> updated = history.edit(id, username, message, linkPreviews.forText(message));
+        if (updated == null) {
+            send(ctx, error("You can only edit your own messages."));
+            return;
+        }
+        deliver(updated, true);
+    }
+
+    private void deleteMessage(WsContext ctx, String username, String id) {
+        if (guard.tooFast(Username.key(username))) {
+            send(ctx, error("You're sending too fast. Wait a moment."));
+            return;
+        }
+        Map<String, Object> updated = history.delete(id, username);
+        if (updated == null) {
+            send(ctx, error("You can only delete your own messages."));
+            return;
+        }
+        deliver(updated, true);
+    }
+
+    private void react(WsContext ctx, String username, String id, String emoji) {
+        if (guard.tooFast(Username.key(username))) {
+            send(ctx, error("You're sending too fast. Wait a moment."));
+            return;
+        }
+        Map<String, Object> updated = history.react(id, username, emoji);
+        if (updated == null) {
+            send(ctx, error("Could not add that reaction."));
+            return;
+        }
+        deliver(updated, true);
+    }
+
+    private void deliver(Map<String, Object> message, boolean mutation) {
+        Map<String, Object> payload = new LinkedHashMap<>(message);
+        payload.put("messageType", message.get("type"));
+        if (mutation) {
+            payload.put("type", "update");
+        }
+        if ("pm".equals(message.get("type"))) {
+            registry.sendTo(stringify(message.get("from")), payload);
+            registry.sendTo(stringify(message.get("to")), payload);
+            return;
+        }
+        registry.broadcast(payload);
     }
 
     private void leave(WsContext ctx) {
