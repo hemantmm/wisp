@@ -9,6 +9,10 @@ import java.util.Map;
 final class RoomHistory {
     private final LinkedHashMap<String, Map<String, Object>> messages = new LinkedHashMap<>();
 
+    synchronized void clear() {
+        messages.clear();
+    }
+
     synchronized void add(Map<String, Object> message) {
         Object text = message.get("text");
         if (text instanceof String value && value.length() > MessageGuard.MAX_TEXT) {

@@ -20,6 +20,13 @@
           <input id="username" name="username" maxlength="20" autocomplete="nickname" placeholder="letters, digits, _">
         </div>
         <p id="join-error" class="error" hidden></p>
+        <fieldset id="lifetime" class="lifetime">
+          <legend>How long should this room last?</legend>
+          <label><input type="radio" name="lifetime" value="1h" checked> 1 hour</label>
+          <label><input type="radio" name="lifetime" value="24h"> 24 hours</label>
+          <label><input type="radio" name="lifetime" value="last"> When the last person leaves</label>
+        </fieldset>
+        <p id="room-status" class="lede" hidden></p>
         <button type="submit" id="join-submit">Join the room</button>
       </form>
     </div>
@@ -43,6 +50,7 @@
         <button type="button" id="people-toggle" class="icon-btn" aria-label="Open people list">☰</button>
         <div class="room-copy">
           <h2 id="room-title">Everyone</h2>
+          <p id="room-clock">Ends when the last person leaves</p>
           <p id="room-hint">Messages go to the whole room.</p>
         </div>
         <button type="button" id="leave" class="pill leave">Leave</button>

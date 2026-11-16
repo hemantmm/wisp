@@ -9,6 +9,7 @@ const composer = document.getElementById("composer");
 const textInput = document.getElementById("text");
 const meLabel = document.getElementById("me");
 const roomTitle = document.getElementById("room-title");
+const roomClock = document.getElementById("room-clock");
 const roomHint = document.getElementById("room-hint");
 const peopleToggle = document.getElementById("people-toggle");
 const sidebarClose = document.getElementById("sidebar-close");
@@ -20,6 +21,8 @@ const nameFields = document.getElementById("name-fields");
 const resumeCopy = document.getElementById("resume-copy");
 const resumeName = document.getElementById("resume-name");
 const joinSubmit = document.getElementById("join-submit");
+const lifetimePicker = document.getElementById("lifetime");
+const roomStatus = document.getElementById("room-status");
 const typingLine = document.getElementById("typing");
 const composeContext = document.getElementById("compose-context");
 const composeLabel = document.getElementById("compose-label");
@@ -51,6 +54,11 @@ let lastTypingSent = 0;
 const typingUntil = new Map();
 let seenTimer;
 const pendingSeen = new Set();
+let pendingLifetime = "1h";
+let joinOnOpen = false;
+let roomExpiresAt = null;
+let clockTimer;
+let roomOfferTimer;
 
 function wsUrl() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -80,8 +88,9 @@ function connect() {
     reconnectAttempt = 0;
     startHeartbeat();
     const name = lockedName() || me || pendingUsername;
-    if (name) {
-      send({ type: "join", username: name, token: deviceToken() });
+    if (name && (stayInRoom || joinOnOpen)) {
+      joinOnOpen = false;
+      send({ type: "join", username: name, token: deviceToken(), lifetime: pendingLifetime });
     }
   });
   socket.addEventListener("message", (event) => {
@@ -146,11 +155,13 @@ function handle(data) {
       stayInRoom = true;
       pendingUsername = data.username;
       localStorage.setItem(NAME_KEY, me);
+      stopRoomOffer();
       joinScreen.hidden = true;
       chatScreen.hidden = false;
       meLabel.textContent = me;
       renderUsers(data.users || []);
       messages.replaceChildren();
+      applyRoom(data);
       if (!data.reconnected) {
         addSystem(`Welcome, ${me}.`);
       }
@@ -159,6 +170,15 @@ function handle(data) {
         noteSeen(item);
       }
       textInput.focus();
+      break;
+    case "ended":
+      joined = false;
+      stayInRoom = false;
+      stopClock();
+      messages.replaceChildren();
+      showJoinScreen();
+      roomStatus.hidden = false;
+      roomStatus.textContent = data.text;
       break;
     case "users":
       renderUsers(data.users || []);
@@ -512,23 +532,102 @@ function showJoinScreen() {
   joinError.hidden = true;
   joinScreen.hidden = false;
   chatScreen.hidden = true;
+  stopClock();
   if (name) {
     usernameInput.removeAttribute("required");
     nameFields.hidden = true;
     resumeCopy.hidden = false;
     resumeName.textContent = name;
-    joinSubmit.textContent = "Continue as " + name;
   } else {
     usernameInput.required = true;
     nameFields.hidden = false;
     resumeCopy.hidden = true;
-    joinSubmit.textContent = "Join the room";
   }
+  refreshRoomOffer();
+  stopRoomOffer();
+  roomOfferTimer = setInterval(refreshRoomOffer, 5000);
+}
+
+function selectedLifetime() {
+  const picked = document.querySelector("input[name=lifetime]:checked");
+  return picked ? picked.value : "1h";
+}
+
+function stopRoomOffer() {
+  clearInterval(roomOfferTimer);
+  roomOfferTimer = undefined;
+}
+
+async function refreshRoomOffer() {
+  let room;
+  try {
+    room = await (await fetch("/room")).json();
+  } catch (error) {
+    return;
+  }
+  if (joined) {
+    return;
+  }
+  const saved = lockedName();
+  if (room.open) {
+    lifetimePicker.hidden = true;
+    roomStatus.hidden = false;
+    roomStatus.textContent = room.lifetime === "last"
+      ? "A room is open. Messages disappear when the last person leaves."
+      : "A room is open. It ends in " + formatRemaining(Date.parse(room.expiresAt) - Date.now()) + ".";
+    joinSubmit.textContent = saved ? "Continue as " + saved : "Join the room";
+  } else {
+    lifetimePicker.hidden = false;
+    if (!roomStatus.textContent.startsWith("This room ended")) {
+      roomStatus.hidden = true;
+    }
+    joinSubmit.textContent = saved ? "Start as " + saved : "Start the room";
+  }
+}
+
+function applyRoom(data) {
+  roomExpiresAt = data.expiresAt ? Date.parse(data.expiresAt) : null;
+  startClock();
+}
+
+function startClock() {
+  stopClock();
+  renderClock();
+  if (roomExpiresAt) {
+    clockTimer = setInterval(renderClock, 1000);
+  }
+}
+
+function stopClock() {
+  clearInterval(clockTimer);
+  clockTimer = undefined;
+}
+
+function renderClock() {
+  if (!roomExpiresAt) {
+    roomClock.textContent = "Ends when the last person leaves";
+    return;
+  }
+  const left = roomExpiresAt - Date.now();
+  roomClock.textContent = left <= 0 ? "This room is ending" : "Ends in " + formatRemaining(left);
+}
+
+function formatRemaining(ms) {
+  const total = Math.max(0, Math.ceil(ms / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  const pad = (value) => String(value).padStart(2, "0");
+  if (hours > 0) {
+    return hours + "h " + pad(minutes) + "m " + pad(seconds) + "s";
+  }
+  return pad(minutes) + ":" + pad(seconds);
 }
 
 function exitRoom() {
   joined = false;
   stayInRoom = false;
+  stopClock();
   clearTimeout(reconnectTimer);
   reconnectTimer = null;
   stopHeartbeat();
@@ -558,12 +657,14 @@ joinForm.addEventListener("submit", (event) => {
   if (saved && pendingUsername !== saved) {
     pendingUsername = saved;
   }
+  pendingLifetime = selectedLifetime();
+  joinOnOpen = true;
   me = pendingUsername;
   joinError.hidden = true;
   if (!socket || socket.readyState === WebSocket.CLOSED) {
     connect();
   } else if (socket.readyState === WebSocket.OPEN) {
-    send({ type: "join", username: pendingUsername, token: deviceToken() });
+    send({ type: "join", username: pendingUsername, token: deviceToken(), lifetime: pendingLifetime });
   }
 });
 
@@ -632,10 +733,26 @@ const savedName = lockedName();
 if (savedName) {
   me = savedName;
   pendingUsername = savedName;
-  stayInRoom = true;
   meLabel.textContent = savedName;
-  joinScreen.hidden = true;
-  chatScreen.hidden = false;
 }
 
-connect();
+async function boot() {
+  let room = { open: false };
+  try {
+    room = await (await fetch("/room")).json();
+  } catch (error) {
+    room = { open: false };
+  }
+  if (savedName && room.open) {
+    pendingLifetime = room.lifetime || "last";
+    stayInRoom = true;
+    joinScreen.hidden = true;
+    chatScreen.hidden = false;
+    connect();
+    return;
+  }
+  showJoinScreen();
+  connect();
+}
+
+boot();

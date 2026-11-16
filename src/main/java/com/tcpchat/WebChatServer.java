@@ -14,6 +14,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 public final class WebChatServer {
@@ -32,6 +33,11 @@ public final class WebChatServer {
         thread.setDaemon(true);
         return thread;
     });
+    private final Object roomLock = new Object();
+    private String lifetime;
+    private Instant expiresAt;
+    private String creator;
+    private ScheduledFuture<?> expiry;
 
     public static void main(String[] args) {
         int port = DEFAULT_PORT;
@@ -49,6 +55,8 @@ public final class WebChatServer {
             config.staticFiles.add("/public", Location.CLASSPATH);
             config.bundledPlugins.enableCors(cors -> cors.addRule(rule -> rule.anyHost()));
         });
+
+        app.get("/room", ctx -> ctx.json(roomStatus()));
 
         app.ws("/ws", ws -> {
             ws.onConnect(ctx -> {
@@ -92,7 +100,7 @@ public final class WebChatServer {
                     send(ctx, error("You're sending too fast. Wait a moment."));
                     return;
                 }
-                join(ctx, stringify(incoming.get("username")), stringify(incoming.get("token")));
+                join(ctx, stringify(incoming.get("username")), stringify(incoming.get("token")), stringify(incoming.get("lifetime")));
             } else {
                 send(ctx, error("Join with a username first."));
             }
@@ -113,7 +121,7 @@ public final class WebChatServer {
         }
     }
 
-    private void join(WsContext ctx, String name, String token) {
+    private void join(WsContext ctx, String name, String token, String requestedLifetime) {
         String username = name == null ? "" : name.trim();
         if (!Username.isValid(username)) {
             send(ctx, error("Use 1–20 letters, digits, or underscores."));
@@ -137,16 +145,23 @@ public final class WebChatServer {
 
         boolean reconnect = claim == ClientRegistry.Claim.RECLAIM;
         String displayName = registry.displayName(username);
-        sessions.entrySet().removeIf(entry ->
-                Username.same(entry.getValue().username(), displayName) && entry.getKey() != ctx);
-        sessions.put(ctx, new Session(displayName, connection));
-
         Map<String, Object> welcome = new LinkedHashMap<>();
-        welcome.put("type", "welcome");
-        welcome.put("username", displayName);
+        synchronized (roomLock) {
+            if (!openRoom(displayName, requestedLifetime)) {
+                registry.disconnect(displayName, connection);
+                send(ctx, error("Pick 1 hour, 24 hours, or when the last person leaves."));
+                return;
+            }
+            sessions.entrySet().removeIf(entry ->
+                    Username.same(entry.getValue().username(), displayName) && entry.getKey() != ctx);
+            sessions.put(ctx, new Session(displayName, connection));
+            welcome.put("type", "welcome");
+            welcome.put("username", displayName);
+            welcome.put("reconnected", reconnect);
+            welcome.put("history", history.forUser(displayName));
+            welcome.putAll(roomFields());
+        }
         welcome.put("users", registry.usernames());
-        welcome.put("reconnected", reconnect);
-        welcome.put("history", history.forUser(displayName));
         send(ctx, welcome);
 
         if (!reconnect) {
@@ -161,7 +176,10 @@ public final class WebChatServer {
             return;
         }
         Map<String, Object> payload = baseMessage("chat", from, message, replyTo);
-        history.add(payload);
+        if (!remember(payload)) {
+            send(ctx, error("This room has ended."));
+            return;
+        }
         registry.broadcast(payload);
     }
 
@@ -187,7 +205,10 @@ public final class WebChatServer {
         }
         Map<String, Object> payload = baseMessage("pm", from, message, replyTo);
         payload.put("to", canonicalTo);
-        history.add(payload);
+        if (!remember(payload)) {
+            send(ctx, error("This room has ended."));
+            return;
+        }
         deliver(payload, false);
     }
 
@@ -311,7 +332,10 @@ public final class WebChatServer {
     }
 
     private void leave(WsContext ctx) {
-        Session session = sessions.remove(ctx);
+        Session session;
+        synchronized (roomLock) {
+            session = sessions.remove(ctx);
+        }
         if (session != null) {
             departures.schedule(() -> departIfStill(session), 8, TimeUnit.SECONDS);
         }
@@ -320,7 +344,10 @@ public final class WebChatServer {
     }
 
     private void departNow(WsContext ctx) {
-        Session session = sessions.remove(ctx);
+        Session session;
+        synchronized (roomLock) {
+            session = sessions.remove(ctx);
+        }
         writeLocks.remove(ctx);
         guard.forget(ctx);
         if (session != null) {
@@ -330,8 +357,116 @@ public final class WebChatServer {
 
     private void departIfStill(Session session) {
         if (registry.disconnect(session.username, session.connection)) {
+            boolean wipe = false;
+            synchronized (roomLock) {
+                wipe = "last".equals(lifetime) && registry.usernames().isEmpty();
+            }
+            if (wipe) {
+                endRoom(false);
+                return;
+            }
             registry.broadcast(system(session.username + " left"));
             registry.broadcast(registry.usersPayload());
+        }
+    }
+
+    private boolean openRoom(String displayName, String requestedLifetime) {
+        synchronized (roomLock) {
+            if (lifetime != null) {
+                return true;
+            }
+            String choice = normalizeLifetime(requestedLifetime);
+            if (choice == null) {
+                return false;
+            }
+            lifetime = choice;
+            creator = displayName;
+            expiresAt = null;
+            if (expiry != null) {
+                expiry.cancel(false);
+                expiry = null;
+            }
+            if (!"last".equals(choice)) {
+                long millis = "1h".equals(choice) ? TimeUnit.HOURS.toMillis(1) : TimeUnit.HOURS.toMillis(24);
+                expiresAt = Instant.now().plusMillis(millis);
+                expiry = departures.schedule(() -> endRoom(true), millis, TimeUnit.MILLISECONDS);
+            }
+            return true;
+        }
+    }
+
+    private static String normalizeLifetime(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return "last";
+        }
+        if ("1h".equals(raw) || "24h".equals(raw) || "last".equals(raw)) {
+            return raw;
+        }
+        return null;
+    }
+
+    private boolean remember(Map<String, Object> payload) {
+        synchronized (roomLock) {
+            if (lifetime == null) {
+                return false;
+            }
+            history.add(payload);
+            return true;
+        }
+    }
+
+    private Map<String, Object> roomStatus() {
+        synchronized (roomLock) {
+            return roomFields();
+        }
+    }
+
+    private Map<String, Object> roomFields() {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("open", lifetime != null);
+        if (lifetime == null) {
+            return body;
+        }
+        body.put("lifetime", lifetime);
+        body.put("creator", creator);
+        if (expiresAt != null) {
+            body.put("expiresAt", expiresAt.toString());
+        }
+        return body;
+    }
+
+    private void endRoom(boolean tellPeople) {
+        List<WsContext> sockets = new java.util.ArrayList<>();
+        List<Session> gone = new java.util.ArrayList<>();
+        synchronized (roomLock) {
+            if (lifetime == null) {
+                return;
+            }
+            lifetime = null;
+            expiresAt = null;
+            creator = null;
+            if (expiry != null) {
+                expiry.cancel(false);
+                expiry = null;
+            }
+            for (Map.Entry<WsContext, Session> entry : sessions.entrySet()) {
+                sockets.add(entry.getKey());
+                gone.add(entry.getValue());
+            }
+            sessions.clear();
+            history.clear();
+        }
+        for (Session session : gone) {
+            registry.disconnect(session.username(), session.connection());
+        }
+        if (!tellPeople) {
+            return;
+        }
+        Map<String, Object> ended = new LinkedHashMap<>();
+        ended.put("type", "ended");
+        ended.put("text", "This room ended. Every message is gone.");
+        for (WsContext ctx : sockets) {
+            send(ctx, ended);
         }
     }
 

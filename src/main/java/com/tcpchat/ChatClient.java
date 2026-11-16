@@ -120,6 +120,11 @@ public final class ChatClient implements WebSocket.Listener {
                     joined = true;
                     me = String.valueOf(data.get("username"));
                     System.out.println("Welcome, " + me + ". Type /help for commands.");
+                    if (data.get("expiresAt") != null) {
+                        System.out.println("This room ends at " + data.get("expiresAt") + ".");
+                    } else if ("last".equals(String.valueOf(data.get("lifetime")))) {
+                        System.out.println("This room ends when the last person leaves.");
+                    }
                     printUsers(data.get("users"));
                 }
                 case "users" -> printUsers(data.get("users"));
@@ -143,6 +148,10 @@ public final class ChatClient implements WebSocket.Listener {
                     } else if (Boolean.TRUE.equals(data.get("edited"))) {
                         System.out.println("* " + data.get("from") + " edited: " + data.get("text"));
                     }
+                }
+                case "ended" -> {
+                    joined = false;
+                    System.out.println(data.get("text"));
                 }
                 case "typing", "pong" -> {
                 }
