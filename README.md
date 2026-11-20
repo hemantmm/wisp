@@ -1,6 +1,14 @@
 # Wisp
 
-Browser chat over WebSockets: several people can join one room, broadcast messages, and send private whispers. Disconnects are cleaned up so the online list stays accurate.
+Lightweight, real-time web & terminal chat over WebSockets. Create multi-channel rooms, broadcast messages, quote replies, react with emojis, and send private whispers. Disconnects are gracefully buffered so transient refreshes don't wipe active sessions.
+
+## Features
+
+- **Multi-Room / Channels**: Each channel maintains its own `RoomHistory`, user presence, and independent expiration timer.
+- **URL Routing**: Direct links via URL hashes (`http://localhost:8080/#engineering`) or friendly paths (`http://localhost:8080/r/engineering`).
+- **Dual Interface**: Full feature parity across modern browsers and terminal CLI clients.
+- **Whispers & Reactions**: Direct private messages (`pm`), quoted reply snapshots, and live emoji reactions.
+- **Configurable Lifetimes**: Choose 1 hour, 24 hours, or automatic teardown when the last person leaves.
 
 ## Run locally
 
@@ -11,29 +19,30 @@ mvn -q package
 java -jar target/tcpchat-1.0.0.jar
 ```
 
-Open [http://localhost:8080](http://localhost:8080) in a browser, and/or join from the terminal. Browser and CLI users share the same room.
+Open [http://localhost:8080](http://localhost:8080) (defaults to `#general`), or visit [http://localhost:8080/#engineering](http://localhost:8080/#engineering) (or [http://localhost:8080/r/engineering](http://localhost:8080/r/engineering)) to join or create a custom room.
 
 ### CLI client
 
 In another terminal:
 
 ```bash
+# Connect to default #general room:
 java -cp target/tcpchat-1.0.0.jar com.tcpchat.ChatClient
+
+# Connect directly to a specific room (e.g. #engineering):
+java -cp target/tcpchat-1.0.0.jar com.tcpchat.ChatClient engineering
+
+# Connect to custom host, port, and room:
+java -cp target/tcpchat-1.0.0.jar com.tcpchat.ChatClient localhost 8080 engineering
 ```
 
-Same host/port as the server if it isn’t localhost:8080:
-
-```bash
-java -cp target/tcpchat-1.0.0.jar com.tcpchat.ChatClient localhost 8081
-```
-
-Hosted site:
-
-```bash
-java -cp target/tcpchat-1.0.0.jar com.tcpchat.ChatClient wss://your-app.example.com/ws
-```
-
-CLI commands: `/msg bob hello`, `/users`, `/help`, `/quit`.
+CLI commands:
+- `/join <room>` — switch or create another channel
+- `/room` — view current room
+- `/msg <user> <text>` — send private whisper
+- `/users` — list users in current room
+- `/help` — display commands
+- `/quit` — disconnect
 
 Use another port if 8080 is taken:
 
@@ -57,6 +66,4 @@ docker run --rm -p 8080:8080 wisp
 1. Push this folder to GitHub.
 2. Create a new **Web Service** from that repo.
 3. Use the Dockerfile (or a native Java build that runs `java -jar target/tcpchat-1.0.0.jar`).
-4. After it goes live, open the public URL in two browsers to chat.
-
-HTTPS hosts should just work: the page uses `wss://` automatically.
+4. After it goes live, open the public URL in two browsers or devices to chat.

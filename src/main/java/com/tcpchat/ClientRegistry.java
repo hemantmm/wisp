@@ -101,4 +101,8 @@ final class ClientRegistry {
         payload.put("users", new ArrayList<>(usernames()));
         return payload;
     }
+
+    void clear() {
+        identities.clear();
+    }
 }

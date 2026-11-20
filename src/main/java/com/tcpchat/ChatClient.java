@@ -29,11 +29,13 @@ public final class ChatClient implements WebSocket.Listener {
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
     private static final String HELP_TEXT = """
             Commands:
-              <message>           broadcast to everyone
-              /msg <user> <text>  private message
-              /users              list online users
-              /help               show this help
-              /quit               disconnect""";
+              <message>            broadcast to everyone in room
+              /msg <user> <text>   private message
+              /join <room>         switch or create room
+              /room                show current room
+              /users               list online users in room
+              /help                show this help
+              /quit                disconnect""";
 
     private final ObjectMapper mapper = new ObjectMapper();
     private final StringBuilder fragments = new StringBuilder();
@@ -41,15 +43,21 @@ public final class ChatClient implements WebSocket.Listener {
     private volatile WebSocket webSocket;
     private volatile boolean joined;
     private volatile String me = "";
+    private volatile String currentRoom;
+
+    public ChatClient(String initialRoom) {
+        this.currentRoom = initialRoom != null ? initialRoom : Room.DEFAULT_ROOM;
+    }
 
     public static void main(String[] args) throws Exception {
         System.setOut(new PrintStream(new FileOutputStream(FileDescriptor.out), true, StandardCharsets.UTF_8));
         URI uri = parseUri(args);
-        System.out.println("Connecting to " + uri);
+        String initialRoom = parseRoom(args);
+        System.out.println("Connecting to " + uri + " (room: #" + initialRoom + ")");
         System.out.println(HELP_TEXT);
         System.out.println();
 
-        ChatClient client = new ChatClient();
+        ChatClient client = new ChatClient(initialRoom);
         String origin = ("wss".equals(uri.getScheme()) ? "https" : "http")
                 + "://" + uri.getHost()
                 + (uri.getPort() == -1 ? "" : ":" + uri.getPort());
@@ -73,10 +81,60 @@ public final class ChatClient implements WebSocket.Listener {
         if (args[0].startsWith("ws://") || args[0].startsWith("wss://")) {
             return URI.create(args[0]);
         }
+        // If single argument is just a room name like "engineering"
+        if (args.length == 1 && !args[0].contains(":") && !args[0].equalsIgnoreCase("localhost") && !args[0].contains(".")) {
+            return URI.create("ws://localhost:" + WebChatServer.DEFAULT_PORT + "/ws");
+        }
         String host = args[0];
-        int port = args.length > 1 ? Integer.parseInt(args[1]) : WebChatServer.DEFAULT_PORT;
+        int port = args.length > 1 && isNumeric(args[1]) ? Integer.parseInt(args[1]) : WebChatServer.DEFAULT_PORT;
         String scheme = port == 443 ? "wss" : "ws";
         return URI.create(scheme + "://" + host + ":" + port + "/ws");
+    }
+
+    private static String parseRoom(String[] args) {
+        if (args.length == 0) {
+            return Room.DEFAULT_ROOM;
+        }
+        if (args[0].startsWith("ws://") || args[0].startsWith("wss://")) {
+            URI uri = URI.create(args[0]);
+            if (uri.getQuery() != null) {
+                for (String param : uri.getQuery().split("&")) {
+                    String[] pair = param.split("=", 2);
+                    if ("room".equalsIgnoreCase(pair[0]) && pair.length > 1) {
+                        String norm = Room.normalize(pair[1]);
+                        if (norm != null) return norm;
+                    }
+                }
+            }
+            if (uri.getFragment() != null && !uri.getFragment().isBlank()) {
+                String norm = Room.normalize(uri.getFragment());
+                if (norm != null) return norm;
+            }
+            if (args.length > 1) {
+                String norm = Room.normalize(args[1]);
+                if (norm != null) return norm;
+            }
+            return Room.DEFAULT_ROOM;
+        }
+        if (args.length == 1 && !args[0].contains(":") && !args[0].equalsIgnoreCase("localhost") && !args[0].contains(".")) {
+            String norm = Room.normalize(args[0]);
+            return norm != null ? norm : Room.DEFAULT_ROOM;
+        }
+        if (args.length >= 3 && !args[2].isBlank()) {
+            String norm = Room.normalize(args[2]);
+            return norm != null ? norm : Room.DEFAULT_ROOM;
+        }
+        return Room.DEFAULT_ROOM;
+    }
+
+    private static boolean isNumeric(String s) {
+        if (s == null || s.isBlank()) return false;
+        try {
+            Integer.parseInt(s);
+            return true;
+        } catch (NumberFormatException e) {
+            return false;
+        }
     }
 
     @Override
@@ -119,7 +177,8 @@ public final class ChatClient implements WebSocket.Listener {
                 case "welcome" -> {
                     joined = true;
                     me = String.valueOf(data.get("username"));
-                    System.out.println("Welcome, " + me + ". Type /help for commands.");
+                    currentRoom = String.valueOf(data.getOrDefault("room", currentRoom));
+                    System.out.println("Welcome, " + me + " to #" + currentRoom + ". Type /help for commands.");
                     if (data.get("expiresAt") != null) {
                         System.out.println("This room ends at " + data.get("expiresAt") + ".");
                     } else if ("last".equals(String.valueOf(data.get("lifetime")))) {
@@ -186,7 +245,7 @@ public final class ChatClient implements WebSocket.Listener {
     private void printUsers(Object users) {
         if (users instanceof List<?> list) {
             String names = String.join(", ", list.stream().map(String::valueOf).toList());
-            System.out.println("Online: " + (names.isEmpty() ? "(none)" : names));
+            System.out.println("Online in #" + currentRoom + ": " + (names.isEmpty() ? "(none)" : names));
         }
     }
 
@@ -207,6 +266,7 @@ public final class ChatClient implements WebSocket.Listener {
                 }
                 Map<String, Object> join = new LinkedHashMap<>();
                 join.put("type", "join");
+                join.put("room", currentRoom);
                 join.put("username", username);
                 join.put("token", deviceToken());
                 send(join);
@@ -239,7 +299,27 @@ public final class ChatClient implements WebSocket.Listener {
                 return true;
             }
             case "/help" -> System.out.println(HELP_TEXT);
+            case "/room" -> System.out.println("Current room: #" + currentRoom);
             case "/users" -> send(Map.of("type", "users"));
+            case "/join", "/switch" -> {
+                if (parts.length < 2 || parts[1].isBlank()) {
+                    System.out.println("Usage: /join <room>");
+                } else {
+                    String target = Room.normalize(parts[1]);
+                    if (target == null) {
+                        System.out.println("Invalid room name. Use 1–30 letters, digits, dashes, or underscores.");
+                    } else {
+                        currentRoom = target;
+                        Map<String, Object> join = new LinkedHashMap<>();
+                        join.put("type", "join");
+                        join.put("room", currentRoom);
+                        join.put("username", me);
+                        join.put("token", deviceToken());
+                        send(join);
+                        System.out.println("Switching to #" + currentRoom + "…");
+                    }
+                }
+            }
             case "/msg" -> {
                 if (parts.length < 3 || parts[2].isBlank()) {
                     System.out.println("Usage: /msg <user> <text>");

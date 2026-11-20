@@ -146,6 +146,30 @@ input:focus {
   outline-offset: 1px;
 }
 
+#room-fields {
+  margin-bottom: 0.9rem;
+}
+
+.room-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.room-prefix {
+  position: absolute;
+  left: 0.95rem;
+  color: var(--accent-2);
+  font-weight: 700;
+  font-size: 1.05rem;
+  pointer-events: none;
+}
+
+.room-input-wrap input {
+  padding-left: 2rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
 .join-card button {
   margin-top: 0.9rem;
   width: 100%;
@@ -205,6 +229,100 @@ aside {
   letter-spacing: 0.12em;
   text-transform: uppercase;
   margin: 0 0.55rem 0.45rem;
+}
+
+.sidebar-section {
+  margin-bottom: 1.25rem;
+}
+
+.sidebar-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 0.55rem;
+  margin-bottom: 0.45rem;
+}
+
+.sidebar-section-header .aside-label {
+  margin: 0;
+}
+
+.text-btn {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  border-radius: 0.5rem;
+  padding: 0.2rem 0.55rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.text-btn:hover {
+  color: var(--ink);
+  border-color: var(--accent-2);
+  background: rgba(239, 196, 138, 0.08);
+}
+
+.current-room-badge {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: var(--mine);
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  color: var(--accent-2);
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 0.92rem;
+}
+
+.current-room-badge .hash-mark {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.active-rooms {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.active-rooms li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.45rem 0.65rem;
+  border-radius: 0.65rem;
+  cursor: pointer;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 0.86rem;
+  transition: background 0.15s, color 0.15s;
+}
+
+.active-rooms li:hover {
+  background: color-mix(in srgb, var(--mine) 60%, transparent);
+  color: var(--ink);
+}
+
+.active-rooms li.active {
+  background: var(--mine);
+  color: var(--accent-2);
+  font-weight: 600;
+}
+
+.room-user-badge {
+  font-size: 0.72rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--muted);
 }
 
 #user-list {

@@ -2,6 +2,8 @@ const joinScreen = document.getElementById("join-screen");
 const chatScreen = document.getElementById("chat-screen");
 const joinForm = document.getElementById("join-form");
 const usernameInput = document.getElementById("username");
+const roomInput = document.getElementById("room-input");
+const joinEyebrow = document.getElementById("join-eyebrow");
 const joinError = document.getElementById("join-error");
 const userList = document.getElementById("user-list");
 const messages = document.getElementById("messages");
@@ -28,17 +30,23 @@ const composeContext = document.getElementById("compose-context");
 const composeLabel = document.getElementById("compose-label");
 const composeCancel = document.getElementById("compose-cancel");
 const sendButton = document.querySelector("#composer button[type=submit]");
+const sidebarRoomName = document.getElementById("sidebar-room-name");
+const copyLinkBtn = document.getElementById("copy-link");
+const newRoomBtn = document.getElementById("new-room-btn");
+const activeRoomsList = document.getElementById("active-rooms");
 
 const HEARTBEAT_MS = 2000;
 const NAME_KEY = "wisp.username";
 const TOKEN_KEY = "wisp.token";
 const USERNAME_PATTERN = /^[A-Za-z0-9_]{1,20}$/;
+const ROOM_PATTERN = /^[A-Za-z0-9_-]{1,30}$/;
 const MAX_TEXT = 2000;
 const REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🎉"];
 const URL_PATTERN = /https?:\/\/[^\s<]+/gi;
 
 let socket;
 let me = "";
+let currentRoom = "general";
 let whisperTo = null;
 let pendingUsername = "";
 let onlineUsers = [];
@@ -59,6 +67,17 @@ let joinOnOpen = false;
 let roomExpiresAt = null;
 let clockTimer;
 let roomOfferTimer;
+
+function getRoomFromUrl() {
+  const hash = (location.hash || "").replace(/^#\/?/, "").trim();
+  return hash || "general";
+}
+
+function normalizeRoom(name) {
+  if (!name) return "general";
+  const clean = name.replace(/^#/, "").trim().toLowerCase();
+  return ROOM_PATTERN.test(clean) ? clean : "general";
+}
 
 function wsUrl() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -90,7 +109,7 @@ function connect() {
     const name = lockedName() || me || pendingUsername;
     if (name && (stayInRoom || joinOnOpen)) {
       joinOnOpen = false;
-      send({ type: "join", username: name, token: deviceToken(), lifetime: pendingLifetime });
+      send({ type: "join", room: currentRoom, username: name, token: deviceToken(), lifetime: pendingLifetime });
     }
   });
   socket.addEventListener("message", (event) => {
@@ -152,6 +171,8 @@ function handle(data) {
     case "welcome":
       joined = true;
       me = data.username;
+      currentRoom = data.room || currentRoom;
+      location.hash = currentRoom;
       stayInRoom = true;
       pendingUsername = data.username;
       localStorage.setItem(NAME_KEY, me);
@@ -159,19 +180,26 @@ function handle(data) {
       joinScreen.hidden = true;
       chatScreen.hidden = false;
       meLabel.textContent = me;
+      if (sidebarRoomName) sidebarRoomName.textContent = currentRoom;
+      document.title = `#${currentRoom} — Wisp`;
+      setTarget(null);
       renderUsers(data.users || []);
       messages.replaceChildren();
       applyRoom(data);
       if (!data.reconnected) {
-        addSystem(`Welcome, ${me}.`);
+        addSystem(`Welcome, ${me} to #${currentRoom}.`);
       }
       for (const item of data.history || []) {
         renderMessage(item);
         noteSeen(item);
       }
       textInput.focus();
+      refreshActiveRooms();
       break;
     case "ended":
+      if (data.room && data.room !== currentRoom) {
+        break;
+      }
       joined = false;
       stayInRoom = false;
       stopClock();
@@ -179,9 +207,11 @@ function handle(data) {
       showJoinScreen();
       roomStatus.hidden = false;
       roomStatus.textContent = data.text;
+      refreshActiveRooms();
       break;
     case "users":
       renderUsers(data.users || []);
+      refreshActiveRooms();
       break;
     case "system":
       addSystem(data.text);
@@ -227,7 +257,7 @@ function renderUsers(users) {
   onlineCount.textContent = String(safeUsers.length);
   userList.replaceChildren();
 
-  const everyone = addPerson("", "All", "Everyone", whisperTo ? "" : "active");
+  const everyone = addPerson("", "All", `Everyone (#${currentRoom})`, whisperTo ? "" : "active");
   everyone.addEventListener("click", () => setTarget(null));
 
   for (const name of safeUsers) {
@@ -248,9 +278,9 @@ function setTarget(name) {
     roomHint.textContent = `Private · only ${name} will see this.`;
     textInput.placeholder = `Message ${name}`;
   } else {
-    roomTitle.textContent = "Everyone";
-    roomHint.textContent = "Messages go to the whole room.";
-    textInput.placeholder = "Message everyone";
+    roomTitle.textContent = `#${currentRoom}`;
+    roomHint.textContent = `Messages go to everyone in #${currentRoom}.`;
+    textInput.placeholder = `Message #${currentRoom}`;
   }
   for (const item of userList.children) {
     const target = item.dataset.target || "";
@@ -258,6 +288,26 @@ function setTarget(name) {
   }
   closePeople();
   textInput.focus();
+}
+
+function switchRoom(rawTarget) {
+  const target = normalizeRoom(rawTarget);
+  if (!target) return;
+  if (joined && target === currentRoom) return;
+  currentRoom = target;
+  location.hash = currentRoom;
+  if (roomInput) roomInput.value = currentRoom;
+  if (sidebarRoomName) sidebarRoomName.textContent = currentRoom;
+  document.title = `#${currentRoom} — Wisp`;
+  whisperTo = null;
+
+  if (joined) {
+    messages.replaceChildren();
+    setTarget(null);
+    send({ type: "join", room: currentRoom, username: me, token: deviceToken(), lifetime: pendingLifetime });
+  } else {
+    refreshRoomOffer();
+  }
 }
 
 function addSystem(text) {
@@ -533,6 +583,12 @@ function showJoinScreen() {
   joinScreen.hidden = false;
   chatScreen.hidden = true;
   stopClock();
+  if (roomInput) {
+    roomInput.value = currentRoom;
+  }
+  if (joinEyebrow) {
+    joinEyebrow.textContent = `Room #${currentRoom}`;
+  }
   if (name) {
     usernameInput.removeAttribute("required");
     nameFields.hidden = true;
@@ -561,27 +617,69 @@ function stopRoomOffer() {
 async function refreshRoomOffer() {
   let room;
   try {
-    room = await (await fetch("/room")).json();
+    room = await (await fetch(`/room?name=${encodeURIComponent(currentRoom)}`)).json();
   } catch (error) {
     return;
   }
   if (joined) {
     return;
   }
+  if (joinEyebrow) {
+    joinEyebrow.textContent = `Room #${currentRoom}`;
+  }
   const saved = lockedName();
   if (room.open) {
     lifetimePicker.hidden = true;
     roomStatus.hidden = false;
     roomStatus.textContent = room.lifetime === "last"
-      ? "A room is open. Messages disappear when the last person leaves."
-      : "A room is open. It ends in " + formatRemaining(Date.parse(room.expiresAt) - Date.now()) + ".";
-    joinSubmit.textContent = saved ? "Continue as " + saved : "Join the room";
+      ? `Room #${currentRoom} is open. Messages disappear when the last person leaves.`
+      : `Room #${currentRoom} is open. It ends in ${formatRemaining(Date.parse(room.expiresAt) - Date.now())}.`;
+    joinSubmit.textContent = saved ? `Continue as ${saved}` : "Join the room";
   } else {
     lifetimePicker.hidden = false;
     if (!roomStatus.textContent.startsWith("This room ended")) {
       roomStatus.hidden = true;
     }
-    joinSubmit.textContent = saved ? "Start as " + saved : "Start the room";
+    joinSubmit.textContent = saved ? `Start #${currentRoom} as ${saved}` : `Start #${currentRoom}`;
+  }
+}
+
+function renderActiveRooms(list) {
+  if (!activeRoomsList) return;
+  activeRoomsList.replaceChildren();
+  const rooms = (list || []).filter((r) => r.open || r.room === currentRoom);
+  if (!rooms.some((r) => r.room === currentRoom)) {
+    rooms.unshift({ room: currentRoom, users: onlineUsers.length, open: true });
+  }
+  for (const r of rooms) {
+    const li = document.createElement("li");
+    if (r.room === currentRoom) {
+      li.className = "active";
+    }
+    const nameSpan = document.createElement("span");
+    nameSpan.textContent = `#${r.room}`;
+    const badge = document.createElement("span");
+    badge.className = "room-user-badge";
+    badge.textContent = `${r.users || 0}`;
+    li.append(nameSpan, badge);
+    li.addEventListener("click", () => {
+      if (r.room !== currentRoom) {
+        switchRoom(r.room);
+      }
+    });
+    activeRoomsList.append(li);
+  }
+}
+
+async function refreshActiveRooms() {
+  try {
+    const resp = await fetch("/rooms");
+    if (resp.ok) {
+      const list = await resp.json();
+      renderActiveRooms(list);
+    }
+  } catch (err) {
+    // ignore
   }
 }
 
@@ -646,6 +744,51 @@ onlinePill.addEventListener("click", openPeople);
 sidebarClose.addEventListener("click", closePeople);
 scrim.addEventListener("click", closePeople);
 
+if (copyLinkBtn) {
+  copyLinkBtn.addEventListener("click", async () => {
+    const url = `${location.origin}/#${currentRoom}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      const orig = copyLinkBtn.textContent;
+      copyLinkBtn.textContent = "Copied!";
+      setTimeout(() => { copyLinkBtn.textContent = orig; }, 2000);
+    } catch (err) {
+      prompt("Copy room link:", url);
+    }
+  });
+}
+
+if (newRoomBtn) {
+  newRoomBtn.addEventListener("click", () => {
+    const entered = prompt("Enter a channel or room name (e.g. engineering, random):", "");
+    if (!entered) return;
+    const clean = normalizeRoom(entered);
+    if (clean) {
+      switchRoom(clean);
+    } else {
+      alert("Use 1–30 letters, digits, dashes, or underscores.");
+    }
+  });
+}
+
+if (roomInput) {
+  roomInput.addEventListener("input", () => {
+    const val = normalizeRoom(roomInput.value);
+    if (val && val !== currentRoom) {
+      currentRoom = val;
+      location.hash = currentRoom;
+      refreshRoomOffer();
+    }
+  });
+}
+
+window.addEventListener("hashchange", () => {
+  const target = normalizeRoom(getRoomFromUrl());
+  if (target !== currentRoom) {
+    switchRoom(target);
+  }
+});
+
 joinForm.addEventListener("submit", (event) => {
   event.preventDefault();
   const saved = lockedName();
@@ -654,6 +797,13 @@ joinForm.addEventListener("submit", (event) => {
     showJoinError("Use 1–20 letters, digits, or underscores.");
     return;
   }
+  const enteredRoom = normalizeRoom(roomInput ? roomInput.value : currentRoom);
+  if (!enteredRoom) {
+    showJoinError("Room name must be 1–30 letters, digits, dashes, or underscores.");
+    return;
+  }
+  currentRoom = enteredRoom;
+  location.hash = currentRoom;
   if (saved && pendingUsername !== saved) {
     pendingUsername = saved;
   }
@@ -664,7 +814,7 @@ joinForm.addEventListener("submit", (event) => {
   if (!socket || socket.readyState === WebSocket.CLOSED) {
     connect();
   } else if (socket.readyState === WebSocket.OPEN) {
-    send({ type: "join", username: pendingUsername, token: deviceToken(), lifetime: pendingLifetime });
+    send({ type: "join", room: currentRoom, username: pendingUsername, token: deviceToken(), lifetime: pendingLifetime });
   }
 });
 
@@ -737,9 +887,15 @@ if (savedName) {
 }
 
 async function boot() {
+  currentRoom = normalizeRoom(getRoomFromUrl());
+  location.hash = currentRoom;
+  if (roomInput) roomInput.value = currentRoom;
+  if (sidebarRoomName) sidebarRoomName.textContent = currentRoom;
+  document.title = `#${currentRoom} — Wisp`;
+
   let room = { open: false };
   try {
-    room = await (await fetch("/room")).json();
+    room = await (await fetch(`/room?name=${encodeURIComponent(currentRoom)}`)).json();
   } catch (error) {
     room = { open: false };
   }
@@ -749,10 +905,12 @@ async function boot() {
     joinScreen.hidden = true;
     chatScreen.hidden = false;
     connect();
+    setInterval(refreshActiveRooms, 8000);
     return;
   }
   showJoinScreen();
   connect();
+  setInterval(refreshActiveRooms, 8000);
 }
 
 boot();

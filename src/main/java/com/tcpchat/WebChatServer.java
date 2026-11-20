@@ -14,30 +14,23 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 public final class WebChatServer {
     public static final int DEFAULT_PORT = 8080;
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
 
-    private final ClientRegistry registry = new ClientRegistry();
-    private final RoomHistory history = new RoomHistory();
-    private final MessageGuard guard = new MessageGuard();
-    private final LinkPreviews linkPreviews = new LinkPreviews();
-    private final ObjectMapper mapper = new ObjectMapper();
-    private final ConcurrentHashMap<WsContext, Session> sessions = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<WsContext, Object> writeLocks = new ConcurrentHashMap<>();
     private final ScheduledExecutorService departures = Executors.newSingleThreadScheduledExecutor(task -> {
         Thread thread = new Thread(task, "departures");
         thread.setDaemon(true);
         return thread;
     });
-    private final Object roomLock = new Object();
-    private String lifetime;
-    private Instant expiresAt;
-    private String creator;
-    private ScheduledFuture<?> expiry;
+    private final RoomManager roomManager = new RoomManager(departures);
+    private final MessageGuard guard = new MessageGuard();
+    private final LinkPreviews linkPreviews = new LinkPreviews();
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final ConcurrentHashMap<WsContext, Session> sessions = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<WsContext, Object> writeLocks = new ConcurrentHashMap<>();
 
     public static void main(String[] args) {
         int port = DEFAULT_PORT;
@@ -56,12 +49,39 @@ public final class WebChatServer {
             config.bundledPlugins.enableCors(cors -> cors.addRule(rule -> rule.anyHost()));
         });
 
-        app.get("/room", ctx -> ctx.json(roomStatus()));
+        app.get("/room", ctx -> {
+            String roomName = ctx.queryParam("name");
+            if (roomName == null || roomName.isBlank()) {
+                roomName = ctx.queryParam("room");
+            }
+            if (roomName == null || roomName.isBlank()) {
+                roomName = Room.DEFAULT_ROOM;
+            }
+            String normalized = Room.normalize(roomName);
+            if (normalized == null) {
+                ctx.status(400).json(Map.of("error", "Invalid room name"));
+                return;
+            }
+            Room room = roomManager.get(normalized);
+            if (room == null) {
+                ctx.json(Map.of("room", normalized, "open", false));
+            } else {
+                ctx.json(room.roomStatus());
+            }
+        });
+
+        app.get("/rooms", ctx -> ctx.json(roomManager.listActiveRooms()));
+
+        app.get("/r/{room}", ctx -> {
+            String room = ctx.pathParam("room");
+            String normalized = Room.normalize(room);
+            ctx.redirect("/#" + (normalized != null ? normalized : Room.DEFAULT_ROOM));
+        });
 
         app.ws("/ws", ws -> {
             ws.onConnect(ctx -> {
                 writeLocks.putIfAbsent(ctx, new Object());
-                ctx.enableAutomaticPings(8, java.util.concurrent.TimeUnit.SECONDS);
+                ctx.enableAutomaticPings(8, TimeUnit.SECONDS);
             });
             ws.onMessage(ctx -> handleMessage(ctx, ctx.message()));
             ws.onClose(ctx -> leave(ctx));
@@ -87,41 +107,54 @@ public final class WebChatServer {
 
         String type = String.valueOf(incoming.getOrDefault("type", ""));
         Session session = sessions.get(ctx);
-        String username = session == null ? null : session.username;
 
         if ("ping".equals(type)) {
             send(ctx, Map.of("type", "pong"));
             return;
         }
 
-        if (username == null) {
+        if (session == null) {
             if ("join".equals(type)) {
                 if (guard.tooFast(ctx)) {
                     send(ctx, error("You're sending too fast. Wait a moment."));
                     return;
                 }
-                join(ctx, stringify(incoming.get("username")), stringify(incoming.get("token")), stringify(incoming.get("lifetime")));
+                join(ctx, stringify(incoming.get("room")), stringify(incoming.get("username")),
+                        stringify(incoming.get("token")), stringify(incoming.get("lifetime")));
             } else {
                 send(ctx, error("Join with a username first."));
             }
             return;
         }
 
+        if ("join".equals(type)) {
+            if (guard.tooFast(ctx)) {
+                send(ctx, error("You're sending too fast. Wait a moment."));
+                return;
+            }
+            join(ctx, stringify(incoming.get("room")), stringify(incoming.get("username")),
+                    stringify(incoming.get("token")), stringify(incoming.get("lifetime")));
+            return;
+        }
+
+        Room room = session.room();
+        String username = session.username();
+
         switch (type) {
-            case "chat" -> broadcastChat(ctx, username, stringify(incoming.get("text")), stringify(incoming.get("replyTo")));
-            case "pm" -> sendPrivate(ctx, username, stringify(incoming.get("to")), stringify(incoming.get("text")), stringify(incoming.get("replyTo")));
-            case "typing" -> showTyping(username, stringify(incoming.get("to")));
-            case "seen" -> markSeen(username, incoming.get("ids"));
-            case "edit" -> editMessage(ctx, username, stringify(incoming.get("id")), stringify(incoming.get("text")));
-            case "delete" -> deleteMessage(ctx, username, stringify(incoming.get("id")));
-            case "react" -> react(ctx, username, stringify(incoming.get("id")), stringify(incoming.get("emoji")));
-            case "users" -> send(ctx, registry.usersPayload());
+            case "chat" -> broadcastChat(ctx, room, username, stringify(incoming.get("text")), stringify(incoming.get("replyTo")));
+            case "pm" -> sendPrivate(ctx, room, username, stringify(incoming.get("to")), stringify(incoming.get("text")), stringify(incoming.get("replyTo")));
+            case "typing" -> showTyping(room, username, stringify(incoming.get("to")));
+            case "seen" -> markSeen(room, username, incoming.get("ids"));
+            case "edit" -> editMessage(ctx, room, username, stringify(incoming.get("id")), stringify(incoming.get("text")));
+            case "delete" -> deleteMessage(ctx, room, username, stringify(incoming.get("id")));
+            case "react" -> react(ctx, room, username, stringify(incoming.get("id")), stringify(incoming.get("emoji")));
+            case "users" -> send(ctx, room.registry().usersPayload());
             case "leave" -> departNow(ctx);
             default -> send(ctx, error("Unknown message type."));
         }
     }
 
-    private void join(WsContext ctx, String name, String token, String requestedLifetime) {
+    private void join(WsContext ctx, String rawRoom, String name, String token, String requestedLifetime) {
         String username = name == null ? "" : name.trim();
         if (!Username.isValid(username)) {
             send(ctx, error("Use 1–20 letters, digits, or underscores."));
@@ -132,58 +165,86 @@ public final class WebChatServer {
             return;
         }
 
+        String targetRoomName = rawRoom;
+        if (targetRoomName == null || targetRoomName.isBlank()) {
+            targetRoomName = ctx.queryParam("room");
+        }
+        String normalizedRoom = Room.normalize(targetRoomName);
+        if (normalizedRoom == null) {
+            send(ctx, error("Room names must be 1–30 letters, digits, dashes, or underscores."));
+            return;
+        }
+
+        Room targetRoom = roomManager.getOrCreate(normalizedRoom);
+        if (targetRoom == null) {
+            send(ctx, error("Invalid room name."));
+            return;
+        }
+
+        Session existingSession = sessions.get(ctx);
+        if (existingSession != null) {
+            if (existingSession.room() != targetRoom || !Username.same(existingSession.username(), username)) {
+                existingSession.room().departIfStill(existingSession.username(), existingSession.connection());
+            }
+        }
+
         ChatConnection connection = payload -> send(ctx, payload);
-        ClientRegistry.Claim claim = registry.claim(username, token, connection);
+        ClientRegistry.Claim claim = targetRoom.registry().claim(username, token, connection);
         if (claim == ClientRegistry.Claim.INVALID) {
             send(ctx, error("Use 1–20 letters, digits, or underscores."));
             return;
         }
         if (claim == ClientRegistry.Claim.TAKEN) {
-            send(ctx, error("That username belongs to another device."));
+            send(ctx, error("That username belongs to another device in this room."));
             return;
         }
 
         boolean reconnect = claim == ClientRegistry.Claim.RECLAIM;
-        String displayName = registry.displayName(username);
-        Map<String, Object> welcome = new LinkedHashMap<>();
-        synchronized (roomLock) {
-            if (!openRoom(displayName, requestedLifetime)) {
-                registry.disconnect(displayName, connection);
-                send(ctx, error("Pick 1 hour, 24 hours, or when the last person leaves."));
-                return;
-            }
-            sessions.entrySet().removeIf(entry ->
-                    Username.same(entry.getValue().username(), displayName) && entry.getKey() != ctx);
-            sessions.put(ctx, new Session(displayName, connection));
-            welcome.put("type", "welcome");
-            welcome.put("username", displayName);
-            welcome.put("reconnected", reconnect);
-            welcome.put("history", history.forUser(displayName));
-            welcome.putAll(roomFields());
+        String displayName = targetRoom.registry().displayName(username);
+
+        if (!targetRoom.open(displayName, requestedLifetime)) {
+            targetRoom.registry().disconnect(displayName, connection);
+            send(ctx, error("Pick 1 hour, 24 hours, or when the last person leaves."));
+            return;
         }
-        welcome.put("users", registry.usernames());
+
+        sessions.entrySet().removeIf(entry ->
+                entry.getValue().room() == targetRoom
+                && Username.same(entry.getValue().username(), displayName)
+                && entry.getKey() != ctx);
+
+        sessions.put(ctx, new Session(targetRoom, displayName, connection));
+
+        Map<String, Object> welcome = new LinkedHashMap<>();
+        welcome.put("type", "welcome");
+        welcome.put("room", targetRoom.name());
+        welcome.put("username", displayName);
+        welcome.put("reconnected", reconnect);
+        welcome.put("history", targetRoom.history().forUser(displayName));
+        welcome.putAll(targetRoom.roomFields());
+        welcome.put("users", targetRoom.registry().usernames());
         send(ctx, welcome);
 
         if (!reconnect) {
-            registry.broadcast(system(displayName + " joined"));
+            targetRoom.registry().broadcast(system(displayName + " joined #" + targetRoom.name()));
         }
-        registry.broadcast(registry.usersPayload());
+        targetRoom.registry().broadcast(targetRoom.registry().usersPayload());
     }
 
-    private void broadcastChat(WsContext ctx, String from, String text, String replyTo) {
+    private void broadcastChat(WsContext ctx, Room room, String from, String text, String replyTo) {
         String message = checkedText(ctx, from, text);
         if (message == null) {
             return;
         }
-        Map<String, Object> payload = baseMessage("chat", from, message, replyTo);
-        if (!remember(payload)) {
+        Map<String, Object> payload = baseMessage("chat", room, from, message, replyTo);
+        if (!room.remember(payload)) {
             send(ctx, error("This room has ended."));
             return;
         }
-        registry.broadcast(payload);
+        room.registry().broadcast(payload);
     }
 
-    private void sendPrivate(WsContext ctx, String from, String to, String text, String replyTo) {
+    private void sendPrivate(WsContext ctx, Room room, String from, String to, String text, String replyTo) {
         String target = to == null ? "" : to.trim();
         if (!Username.isValid(target)) {
             send(ctx, error("Private messages need a user and some text."));
@@ -197,19 +258,19 @@ public final class WebChatServer {
             send(ctx, error("You cannot message yourself."));
             return;
         }
-        String canonicalTo = registry.displayName(target);
-        boolean online = registry.usernames().stream().anyMatch(name -> Username.same(name, target));
+        String canonicalTo = room.registry().displayName(target);
+        boolean online = room.registry().usernames().stream().anyMatch(name -> Username.same(name, target));
         if (!online) {
-            send(ctx, error("User not found: " + target));
+            send(ctx, error("User not found in this room: " + target));
             return;
         }
-        Map<String, Object> payload = baseMessage("pm", from, message, replyTo);
+        Map<String, Object> payload = baseMessage("pm", room, from, message, replyTo);
         payload.put("to", canonicalTo);
-        if (!remember(payload)) {
+        if (!room.remember(payload)) {
             send(ctx, error("This room has ended."));
             return;
         }
-        deliver(payload, false);
+        deliver(room, payload, false);
     }
 
     private String checkedText(WsContext ctx, String from, String text) {
@@ -228,14 +289,15 @@ public final class WebChatServer {
         return message;
     }
 
-    private Map<String, Object> baseMessage(String type, String from, String text, String replyTo) {
+    private Map<String, Object> baseMessage(String type, Room room, String from, String text, String replyTo) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("type", type);
+        payload.put("room", room.name());
         payload.put("id", UUID.randomUUID().toString());
         payload.put("from", from);
         payload.put("text", text);
         payload.put("time", Instant.now().toString());
-        Map<String, Object> reply = history.replySnapshot(replyTo, from);
+        Map<String, Object> reply = room.history().replySnapshot(replyTo, from);
         if (reply != null) {
             payload.put("reply", reply);
         }
@@ -246,22 +308,23 @@ public final class WebChatServer {
         return payload;
     }
 
-    private void showTyping(String username, String to) {
+    private void showTyping(Room room, String username, String to) {
         if (guard.typingTooSoon(Username.key(username) + ":typing")) {
             return;
         }
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("type", "typing");
+        payload.put("room", room.name());
         payload.put("from", username);
         if (Username.isValid(to)) {
-            payload.put("to", registry.displayName(to));
-            registry.sendTo(to, payload);
+            payload.put("to", room.registry().displayName(to));
+            room.registry().sendTo(to, payload);
             return;
         }
-        registry.broadcastExcept(username, payload);
+        room.registry().broadcastExcept(username, payload);
     }
 
-    private void markSeen(String username, Object rawIds) {
+    private void markSeen(Room room, String username, Object rawIds) {
         if (!(rawIds instanceof List<?> ids)) {
             return;
         }
@@ -271,206 +334,86 @@ public final class WebChatServer {
                 break;
             }
             counted++;
-            Map<String, Object> updated = history.seen(stringify(rawId), username);
+            Map<String, Object> updated = room.history().seen(stringify(rawId), username);
             if (updated != null) {
-                deliver(updated, true);
+                deliver(room, updated, true);
             }
         }
     }
 
-    private void editMessage(WsContext ctx, String username, String id, String text) {
+    private void editMessage(WsContext ctx, Room room, String username, String id, String text) {
         String message = checkedText(ctx, username, text);
         if (message == null) {
             return;
         }
-        Map<String, Object> updated = history.edit(id, username, message, linkPreviews.forText(message));
+        Map<String, Object> updated = room.history().edit(id, username, message, linkPreviews.forText(message));
         if (updated == null) {
             send(ctx, error("You can only edit your own messages."));
             return;
         }
-        deliver(updated, true);
+        deliver(room, updated, true);
     }
 
-    private void deleteMessage(WsContext ctx, String username, String id) {
+    private void deleteMessage(WsContext ctx, Room room, String username, String id) {
         if (guard.tooFast(Username.key(username))) {
             send(ctx, error("You're sending too fast. Wait a moment."));
             return;
         }
-        Map<String, Object> updated = history.delete(id, username);
+        Map<String, Object> updated = room.history().delete(id, username);
         if (updated == null) {
             send(ctx, error("You can only delete your own messages."));
             return;
         }
-        deliver(updated, true);
+        deliver(room, updated, true);
     }
 
-    private void react(WsContext ctx, String username, String id, String emoji) {
+    private void react(WsContext ctx, Room room, String username, String id, String emoji) {
         if (guard.tooFast(Username.key(username))) {
             send(ctx, error("You're sending too fast. Wait a moment."));
             return;
         }
-        Map<String, Object> updated = history.react(id, username, emoji);
+        Map<String, Object> updated = room.history().react(id, username, emoji);
         if (updated == null) {
             send(ctx, error("Could not add that reaction."));
             return;
         }
-        deliver(updated, true);
+        deliver(room, updated, true);
     }
 
-    private void deliver(Map<String, Object> message, boolean mutation) {
+    private void deliver(Room room, Map<String, Object> message, boolean mutation) {
         Map<String, Object> payload = new LinkedHashMap<>(message);
+        payload.put("room", room.name());
         payload.put("messageType", message.get("type"));
         if (mutation) {
             payload.put("type", "update");
         }
         if ("pm".equals(message.get("type"))) {
-            registry.sendTo(stringify(message.get("from")), payload);
-            registry.sendTo(stringify(message.get("to")), payload);
+            room.registry().sendTo(stringify(message.get("from")), payload);
+            room.registry().sendTo(stringify(message.get("to")), payload);
             return;
         }
-        registry.broadcast(payload);
+        room.registry().broadcast(payload);
     }
 
     private void leave(WsContext ctx) {
-        Session session;
-        synchronized (roomLock) {
-            session = sessions.remove(ctx);
-        }
+        Session session = sessions.remove(ctx);
         if (session != null) {
-            departures.schedule(() -> departIfStill(session), 8, TimeUnit.SECONDS);
+            departures.schedule(() -> session.room().departIfStill(session.username(), session.connection()), 8, TimeUnit.SECONDS);
         }
         writeLocks.remove(ctx);
         guard.forget(ctx);
     }
 
     private void departNow(WsContext ctx) {
-        Session session;
-        synchronized (roomLock) {
-            session = sessions.remove(ctx);
-        }
+        Session session = sessions.remove(ctx);
         writeLocks.remove(ctx);
         guard.forget(ctx);
         if (session != null) {
-            departIfStill(session);
+            session.room().departIfStill(session.username(), session.connection());
         }
     }
 
-    private void departIfStill(Session session) {
-        if (registry.disconnect(session.username, session.connection)) {
-            boolean wipe = false;
-            synchronized (roomLock) {
-                wipe = "last".equals(lifetime) && registry.usernames().isEmpty();
-            }
-            if (wipe) {
-                endRoom(false);
-                return;
-            }
-            registry.broadcast(system(session.username + " left"));
-            registry.broadcast(registry.usersPayload());
-        }
-    }
-
-    private boolean openRoom(String displayName, String requestedLifetime) {
-        synchronized (roomLock) {
-            if (lifetime != null) {
-                return true;
-            }
-            String choice = normalizeLifetime(requestedLifetime);
-            if (choice == null) {
-                return false;
-            }
-            lifetime = choice;
-            creator = displayName;
-            expiresAt = null;
-            if (expiry != null) {
-                expiry.cancel(false);
-                expiry = null;
-            }
-            if (!"last".equals(choice)) {
-                long millis = "1h".equals(choice) ? TimeUnit.HOURS.toMillis(1) : TimeUnit.HOURS.toMillis(24);
-                expiresAt = Instant.now().plusMillis(millis);
-                expiry = departures.schedule(() -> endRoom(true), millis, TimeUnit.MILLISECONDS);
-            }
-            return true;
-        }
-    }
-
-    private static String normalizeLifetime(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return "last";
-        }
-        if ("1h".equals(raw) || "24h".equals(raw) || "last".equals(raw)) {
-            return raw;
-        }
-        return null;
-    }
-
-    private boolean remember(Map<String, Object> payload) {
-        synchronized (roomLock) {
-            if (lifetime == null) {
-                return false;
-            }
-            history.add(payload);
-            return true;
-        }
-    }
-
-    private Map<String, Object> roomStatus() {
-        synchronized (roomLock) {
-            return roomFields();
-        }
-    }
-
-    private Map<String, Object> roomFields() {
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("open", lifetime != null);
-        if (lifetime == null) {
-            return body;
-        }
-        body.put("lifetime", lifetime);
-        body.put("creator", creator);
-        if (expiresAt != null) {
-            body.put("expiresAt", expiresAt.toString());
-        }
-        return body;
-    }
-
-    private void endRoom(boolean tellPeople) {
-        List<WsContext> sockets = new java.util.ArrayList<>();
-        List<Session> gone = new java.util.ArrayList<>();
-        synchronized (roomLock) {
-            if (lifetime == null) {
-                return;
-            }
-            lifetime = null;
-            expiresAt = null;
-            creator = null;
-            if (expiry != null) {
-                expiry.cancel(false);
-                expiry = null;
-            }
-            for (Map.Entry<WsContext, Session> entry : sessions.entrySet()) {
-                sockets.add(entry.getKey());
-                gone.add(entry.getValue());
-            }
-            sessions.clear();
-            history.clear();
-        }
-        for (Session session : gone) {
-            registry.disconnect(session.username(), session.connection());
-        }
-        if (!tellPeople) {
-            return;
-        }
-        Map<String, Object> ended = new LinkedHashMap<>();
-        ended.put("type", "ended");
-        ended.put("text", "This room ended. Every message is gone.");
-        for (WsContext ctx : sockets) {
-            send(ctx, ended);
-        }
-    }
-
-    private record Session(String username, ChatConnection connection) {}
+    private record Session(Room room, String username, ChatConnection connection) {}
 
     private void send(WsContext ctx, Map<String, Object> payload) {
         String json;
@@ -491,14 +434,14 @@ public final class WebChatServer {
         }
     }
 
-    private static Map<String, Object> error(String text) {
+    static Map<String, Object> error(String text) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("type", "error");
         payload.put("text", text);
         return payload;
     }
 
-    private static Map<String, Object> system(String text) {
+    static Map<String, Object> system(String text) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("type", "system");
         payload.put("text", text);
